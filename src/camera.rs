@@ -103,7 +103,7 @@ impl Camera {
     pub fn zoom_by(&mut self, factor: f32, world_focus: Vec2) {
         let old_zoom = self.zoom;
         self.zoom *= factor;
-        self.zoom = self.zoom.clamp(0.01, 1000.0); // 限制缩放范围，防止过大或过小
+        self.zoom = self.zoom.clamp(0.001, 1000.0); // 限制缩放范围，防止过大或过小
 
         // 调整相机位置以保持焦点不变
         let offset = self.position - world_focus; // 获取焦点到相机中心的向量

@@ -108,7 +108,14 @@ impl State {
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(surface_caps.formats[0]); // 找不到就用第一个
+            // 如果找不到 sRGB 格式，那么就用默认的第一个，但这可能会出现颜色不匹配问题
+            // 考虑在此处直接 panic 或 fallback 到一个已知行为的安全非sRGB格式，并手动在shader中转换
+            .unwrap_or_else(|| {
+                // Warning: If no sRGB format is found, colors might still look off 
+                // unless you manually convert to sRGB in the fragment shader.
+                log::warn!("No sRGB surface format found, falling back to {:?}", surface_caps.formats[0]);
+                surface_caps.formats[0]
+            });
 
         log::info!(
             "Using {} ({:?}, Preferred Format: {:?})",
@@ -295,7 +302,7 @@ impl State {
             CircleInstance {
                 position: [0.0, 150.0].into(),
                 radius_scale: BASE_NODE_RADIUS * 1.5, // 大一些的节点
-                color: Color::from((255, 255, 0)).into_linear_rgba(),
+                color: Color::from((255, 200, 0)).into_linear_rgba(),
             },
         ];
 
