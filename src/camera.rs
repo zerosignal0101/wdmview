@@ -8,7 +8,7 @@ use bytemuck::{Pod, Zeroable};
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct CameraUniform {
-    pub view_proj: [f32; 4], // 视图投影矩阵
+    pub view_proj: [[f32; 4]; 4], // 视图投影矩阵
 }
 
 pub struct Camera {
