@@ -7,6 +7,8 @@ use winit::{
 use wasm_bindgen::prelude::*;
 
 mod models;
+mod camera;
+mod color;
 
 struct State {
     window: Arc<Window>,
