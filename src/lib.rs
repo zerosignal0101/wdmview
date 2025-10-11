@@ -9,16 +9,92 @@ use wasm_bindgen::prelude::*;
 mod models;
 
 struct State {
-    window: Arc<Window>
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    is_surface_configured: bool,
 }
 
 impl State {
     async fn new(window: Arc<Window>) -> anyhow::Result<State> {
-        Ok( Self { window })
+        let size = window.inner_size();
+
+        let gpu = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            #[cfg(not(target_arch = "wasm32"))]
+            backends: wgpu::Backends::PRIMARY,
+            #[cfg(target_arch = "wasm32")]
+            backends: wgpu::Backends::BROWSER_WEBGPU,
+            ..Default::default()
+        });
+
+        let surface = gpu.create_surface(window.clone()).unwrap();
+
+        let adapter = gpu
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .unwrap();
+        let adapter_info = adapter.get_info();
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::empty(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: Default::default(),
+                trace: wgpu::Trace::Off, // Trace path
+            })
+            .await
+            .unwrap();
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let texture_format = surface_caps.formats[0];
+
+        log::info!(
+            "Using {} ({:?}, Preferred Format: {:?})",
+            adapter_info.name,
+            adapter_info.backend,
+            texture_format,
+        );
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: texture_format,
+            width: size.width,
+            height: size.height,
+            present_mode: surface_caps.present_modes[0],
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        Ok( Self {
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            is_surface_configured: false,
+        })
     }
 
     fn window(&self) -> &Window {
         &self.window
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
+            self.is_surface_configured = true;
+        }
     }
 }
 
@@ -89,6 +165,10 @@ impl ApplicationHandler<State> for App {
         #[cfg(target_arch = "wasm32")]
         {
             event.window.request_redraw();
+            event.resize(
+                event.window.inner_size().width,
+                event.window.inner_size().height,
+            );
         }
         self.state = Some(event);
     }
@@ -106,7 +186,7 @@ impl ApplicationHandler<State> for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {},
+            WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
                 
             }
