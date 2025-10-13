@@ -67,14 +67,6 @@ struct State {
     last_frame_instant: instant::Instant,
     frame_count_in_second: u32,
     current_fps: u32,
-
-    // Glyphon related fields
-    glyphon_font_system: glyphon::FontSystem,
-    glyphon_viewport: glyphon::Viewport,
-    glyphon_swash_cache: glyphon::SwashCache,
-    glyphon_atlas: glyphon::TextAtlas,
-    glyphon_renderer: glyphon::TextRenderer,
-    glyphon_buffer: glyphon::Buffer,
 }
 
 impl State {
@@ -365,37 +357,6 @@ impl State {
             }
         );
 
-        // --- Glyphon Initialization ---
-        let mut glyphon_font_system = glyphon::FontSystem::new_with_fonts([
-                    glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
-                        "../assets/fonts/Iced-Icons.ttf"
-                    ))),
-                    glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
-                        "../assets/fonts/Roboto-Regular.ttf"
-                    ))),
-                    glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
-                        "../assets/fonts/bootstrap-icons.ttf"
-                    ))),
-                ]);
-        let glyphon_swash_cache = glyphon::SwashCache::new();
-        let glyphon_cache = glyphon::Cache::new(&device);
-        let mut glyphon_atlas = glyphon::TextAtlas::new(&device, &queue, &glyphon_cache, texture_format);
-        let glyphon_viewport = glyphon::Viewport::new(&device, &glyphon_cache);
-        let glyphon_renderer = glyphon::TextRenderer::new(&mut glyphon_atlas, &device, wgpu::MultisampleState::default(), None);
-
-        // Create a text buffer
-        let mut glyphon_buffer = glyphon::Buffer::new(
-            &mut glyphon_font_system,
-            glyphon::Metrics::new(30.0, 30.0), // Font size and line height
-        );
-        // Set initial text
-        glyphon_buffer.set_text(
-            &mut glyphon_font_system,
-            "FPS: --",
-            &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Basic,
-        );
-
         Ok( Self {
             window,
             surface,
@@ -428,13 +389,6 @@ impl State {
             last_frame_instant: Instant::now(),
             frame_count_in_second: 0,
             current_fps: 0,
-
-            glyphon_font_system,
-            glyphon_swash_cache,
-            glyphon_viewport,
-            glyphon_atlas,
-            glyphon_renderer,
-            glyphon_buffer,
         })
     }
 
@@ -452,15 +406,6 @@ impl State {
             // 通知相机更新宽高比
             self.camera.update_aspect_ratio(width, height);
             self.camera_needs_update = true;
-
-            // Update glyphon buffer size
-            self.glyphon_buffer.set_size(
-                &mut self.glyphon_font_system,
-                Some(width as f32),
-                Some(height as f32),
-            );
-            self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
-            self.glyphon_viewport.update(&self.queue, glyphon::Resolution { width, height });
 
             self.is_surface_configured = true;
             self.window.request_redraw(); // 请求重绘
@@ -510,38 +455,8 @@ impl State {
             self.current_fps = self.frame_count_in_second;
             self.frame_count_in_second = 0;
             self.last_frame_instant = now;
-
-            // Update glyphon text buffer
-            self.glyphon_buffer.set_text(
-                &mut self.glyphon_font_system,
-                &format!("FPS: {}", self.current_fps),
-                &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-                glyphon::Shaping::Basic,
-            );
-            self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
         }
         // --- End FPS Calculation ---
-
-        // Prepare glyphon text for rendering (uploads glyph textures)
-        // This must happen BEFORE begin_render_pass if the texture needs to be read.
-        // However, if rendering directly to the swapchain view, it happens before rendering.
-        self.glyphon_renderer.prepare(
-            &self.device,
-            &self.queue,
-            &mut self.glyphon_font_system,
-            &mut self.glyphon_atlas,
-            &self.glyphon_viewport,
-            [glyphon::TextArea {
-                buffer: &self.glyphon_buffer,
-                left: 0.0,
-                top: 5.0,
-                scale: 1.0,
-                bounds: glyphon::TextBounds::default(),
-                default_color: glyphon::Color::rgb(255, 255, 255),
-                custom_glyphs: &[]
-            }],
-            &mut self.glyphon_swash_cache,
-        ).unwrap(); // Handle error gracefully in real app
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -578,9 +493,6 @@ impl State {
                 0,
                 0..self.circle_instances.len() as u32, // 为每个实例绘制
             );
-
-            // --- Draw Glyphon Text ---
-            self.glyphon_renderer.render(&self.glyphon_atlas, &self.glyphon_viewport, &mut render_pass).unwrap();
         } // `render_pass` 结束，因为它需要 `encoder` 的可变借用
 
         self.queue.submit(std::iter::once(encoder.finish()));

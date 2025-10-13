@@ -21,8 +21,6 @@ glam = "0.30"
 winit = "0.30"
 wgpu = { version = "27" }
 
-glyphon = { git = "https://github.com/grovesNL/glyphon.git", rev = "de4b5b8d4e52310be8df56d82a759593920acc04" }
-
 [dependencies.image]
 version = "0.24"
 default-features = false
