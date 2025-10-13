@@ -7,6 +7,7 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey, SmolStr}, // Added SmolStr for `Character` event
     window::Window,
 };
+use instant::Instant;
 use glam::{Vec2, Mat4}; // 引入 glam 类型
 use wgpu::util::DeviceExt; // 用于 buffer_init_descriptor
 
@@ -61,6 +62,19 @@ struct State {
     mouse_current_pos_screen: Vec2, // 鼠标当前屏幕坐标
     is_mouse_left_pressed: bool,      // 鼠标左键是否按下
     // is_mouse_right_pressed: bool,
+
+    // For FPS counter
+    last_frame_instant: instant::Instant,
+    frame_count_in_second: u32,
+    current_fps: u32,
+
+    // Glyphon related fields
+    glyphon_font_system: glyphon::FontSystem,
+    glyphon_viewport: glyphon::Viewport,
+    glyphon_swash_cache: glyphon::SwashCache,
+    glyphon_atlas: glyphon::TextAtlas,
+    glyphon_renderer: glyphon::TextRenderer,
+    glyphon_buffer: glyphon::Buffer,
 }
 
 impl State {
@@ -351,6 +365,37 @@ impl State {
             }
         );
 
+        // --- Glyphon Initialization ---
+        let mut glyphon_font_system = glyphon::FontSystem::new_with_fonts([
+                    glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
+                        "../assets/fonts/Iced-Icons.ttf"
+                    ))),
+                    glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
+                        "../assets/fonts/Roboto-Regular.ttf"
+                    ))),
+                    glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
+                        "../assets/fonts/bootstrap-icons.ttf"
+                    ))),
+                ]);
+        let glyphon_swash_cache = glyphon::SwashCache::new();
+        let glyphon_cache = glyphon::Cache::new(&device);
+        let mut glyphon_atlas = glyphon::TextAtlas::new(&device, &queue, &glyphon_cache, texture_format);
+        let glyphon_viewport = glyphon::Viewport::new(&device, &glyphon_cache);
+        let glyphon_renderer = glyphon::TextRenderer::new(&mut glyphon_atlas, &device, wgpu::MultisampleState::default(), None);
+
+        // Create a text buffer
+        let mut glyphon_buffer = glyphon::Buffer::new(
+            &mut glyphon_font_system,
+            glyphon::Metrics::new(30.0, 30.0), // Font size and line height
+        );
+        // Set initial text
+        glyphon_buffer.set_text(
+            &mut glyphon_font_system,
+            "FPS: --",
+            &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Basic,
+        );
+
         Ok( Self {
             window,
             surface,
@@ -378,6 +423,18 @@ impl State {
 
             mouse_current_pos_screen: Vec2::ZERO,
             is_mouse_left_pressed: false,
+
+            // FPS counter + Glyphon
+            last_frame_instant: Instant::now(),
+            frame_count_in_second: 0,
+            current_fps: 0,
+
+            glyphon_font_system,
+            glyphon_swash_cache,
+            glyphon_viewport,
+            glyphon_atlas,
+            glyphon_renderer,
+            glyphon_buffer,
         })
     }
 
@@ -388,13 +445,24 @@ impl State {
     /// 窗口大小改变时调用
     fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
+            log::info!("Resize {}, {}", width, height);
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
-            self.is_surface_configured = true;
             // 通知相机更新宽高比
             self.camera.update_aspect_ratio(width, height);
             self.camera_needs_update = true;
+
+            // Update glyphon buffer size
+            self.glyphon_buffer.set_size(
+                &mut self.glyphon_font_system,
+                Some(width as f32),
+                Some(height as f32),
+            );
+            self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+            self.glyphon_viewport.update(&self.queue, glyphon::Resolution { width, height });
+
+            self.is_surface_configured = true;
             self.window.request_redraw(); // 请求重绘
         }
     }
@@ -433,6 +501,48 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
+        // --- FPS Calculation ---
+        self.frame_count_in_second += 1;
+        let now = Instant::now();
+        let elapsed = (now - self.last_frame_instant).as_secs_f32();
+
+        if elapsed >= 1.0 {
+            self.current_fps = self.frame_count_in_second;
+            self.frame_count_in_second = 0;
+            self.last_frame_instant = now;
+
+            // Update glyphon text buffer
+            self.glyphon_buffer.set_text(
+                &mut self.glyphon_font_system,
+                &format!("FPS: {}", self.current_fps),
+                &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+                glyphon::Shaping::Basic,
+            );
+            self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+        }
+        // --- End FPS Calculation ---
+
+        // Prepare glyphon text for rendering (uploads glyph textures)
+        // This must happen BEFORE begin_render_pass if the texture needs to be read.
+        // However, if rendering directly to the swapchain view, it happens before rendering.
+        self.glyphon_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.glyphon_font_system,
+            &mut self.glyphon_atlas,
+            &self.glyphon_viewport,
+            [glyphon::TextArea {
+                buffer: &self.glyphon_buffer,
+                left: 0.0,
+                top: 5.0,
+                scale: 1.0,
+                bounds: glyphon::TextBounds::default(),
+                default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[]
+            }],
+            &mut self.glyphon_swash_cache,
+        ).unwrap(); // Handle error gracefully in real app
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -440,7 +550,7 @@ impl State {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(Color::from((18, 18, 18)).into_linear_wgpu_color()), // 背景色：深灰
+                        load: wgpu::LoadOp::Clear(Color::from((18, 18, 18)).into_linear_wgpu_color()),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -468,6 +578,9 @@ impl State {
                 0,
                 0..self.circle_instances.len() as u32, // 为每个实例绘制
             );
+
+            // --- Draw Glyphon Text ---
+            self.glyphon_renderer.render(&self.glyphon_atlas, &self.glyphon_viewport, &mut render_pass).unwrap();
         } // `render_pass` 结束，因为它需要 `encoder` 的可变借用
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -665,6 +778,7 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
                         KeyCode::KeyD | KeyCode::ArrowRight => { state.camera.position.x += pan_speed; changed = true; },
                         KeyCode::KeyQ => { state.camera.zoom *= zoom_factor; changed = true; },
                         KeyCode::KeyE => { state.camera.zoom /= zoom_factor; changed = true; },
+                        KeyCode::KeyR => { log::info!("FPS: {}", state.current_fps) },
                         _ => {}
                     }
 
