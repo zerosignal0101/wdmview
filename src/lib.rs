@@ -1,77 +1,74 @@
-// src/lib.rs
-use std::sync::Arc;
+// src/lib.rs (Final Proposed Code)
+use std::{collections::HashMap, sync::Arc, sync::Mutex}; // Added Mutex
 use winit::{
     application::ApplicationHandler,
     event::*,
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey, SmolStr}, // Added SmolStr for `Character` event
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy}, // Added EventLoopProxy
+    keyboard::{KeyCode, PhysicalKey, SmolStr},
     window::Window,
 };
 use instant::Instant;
-use glam::{Vec2, Mat4}; // 引入 glam 类型
-use wgpu::util::DeviceExt; // 用于 buffer_init_descriptor
+use glam::{Vec2, Mat4};
+use serde::{Deserialize, Serialize};
+use wgpu::util::DeviceExt;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+use once_cell::sync::OnceCell; // For global WasmApi instance
 
 mod models;
-mod camera; // 引入 camera 模块
-mod color; // Color 模块已经存在
+mod camera;
+mod color;
 
 use models::{Vertex2D, CircleInstance, LineVertex};
 use camera::{Camera, CameraUniform};
 use color::Color;
 
-// 定义节点的基础半径（世界单位）
 const BASE_NODE_RADIUS: f32 = 25.0;
-
-// Shaders 作为字符串字面量嵌入
 const LINES_WGSL: &str = include_str!("./shaders/lines.wgsl");
 const CIRCLES_WGSL: &str = include_str!("./shaders/circles.wgsl");
 
+#[cfg(target_arch = "wasm32")]
+static WASM_API_INSTANCE: OnceCell<WasmApi> = OnceCell::new();
+
+#[derive(Debug)]
 struct State {
-    window: Arc<Window>,
+    // Removed Arc<Window> from here
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
 
-    // 相机相关
     camera: Camera,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    camera_uniform: CameraUniform, // 存储当前帧的 uniform 数据
-    camera_needs_update: bool, // 标记相机是否需要更新 uniform buffer
+    camera_uniform: CameraUniform,
+    camera_needs_update: bool,
 
-    // 渲染管线
     line_render_pipeline: wgpu::RenderPipeline,
     circle_render_pipeline: wgpu::RenderPipeline,
 
-    // 节点 (圆形) 数据
     circle_instances: Vec<CircleInstance>,
-    circle_instance_buffer: wgpu::Buffer, // 实例数据缓冲区
-    quad_vertex_buffer: wgpu::Buffer,    // 基础四边形顶点缓冲区
-    quad_index_buffer: wgpu::Buffer,     // 基础四边形索引缓冲区
+    circle_instance_buffer: wgpu::Buffer,
+    quad_vertex_buffer: wgpu::Buffer,
+    quad_index_buffer: wgpu::Buffer,
 
-    // 连接 (线段) 数据
     line_vertices: Vec<LineVertex>,
     line_vertex_buffer: wgpu::Buffer,
 
-    // 鼠标输入状态
-    mouse_current_pos_screen: Vec2, // 鼠标当前屏幕坐标
-    is_mouse_left_pressed: bool,      // 鼠标左键是否按下
-    // is_mouse_right_pressed: bool,
+    mouse_current_pos_screen: Vec2,
+    is_mouse_left_pressed: bool,
 
-    // For FPS counter
     last_frame_instant: instant::Instant,
     frame_count_in_second: u32,
     current_fps: u32,
 }
 
 impl State {
-    async fn new(window: Arc<Window>) -> anyhow::Result<State> {
-        let size = window.inner_size();
+    // Now takes Arc<Window> for setup, doesn't store it.
+    async fn new(window_arc: Arc<Window>) -> anyhow::Result<State> {
+        let size = window_arc.inner_size();
 
         let gpu = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             #[cfg(not(target_arch = "wasm32"))]
@@ -81,7 +78,8 @@ impl State {
             ..Default::default()
         });
 
-        let surface = gpu.create_surface(window.clone()).unwrap();
+        // Surface itself is !Send on WASM due to HtmlCanvasElement
+        let surface = gpu.create_surface(window_arc).unwrap();
 
         let adapter = gpu
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -96,29 +94,21 @@ impl State {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
-                // 为了更好的兼容性，特别是 WebGL -> WebGPU
-                // 确保支持了 `shader-f16` (可能并非所有设备都支持) 和 `texture-compression-bc`,
-                // 具体特性根据需求添加，这里保持空以最大兼容。
-                required_features: wgpu::Features::empty(), // wgpu::Features::NON_FILL_POLYGON_MODE for Wireframe
+                required_features: wgpu::Features::empty(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 required_limits: wgpu::Limits::default(),
                 memory_hints: Default::default(),
-                trace: wgpu::Trace::Off, // Trace path
+                trace: wgpu::Trace::Off,
             })
             .await
             .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
-        // 优先选择 sRGB 格式，如果可用 (通常是 `Rgba8UnormSrgb`)
         let texture_format = surface_caps.formats
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            // 如果找不到 sRGB 格式，那么就用默认的第一个，但这可能会出现颜色不匹配问题
-            // 考虑在此处直接 panic 或 fallback 到一个已知行为的安全非sRGB格式，并手动在shader中转换
             .unwrap_or_else(|| {
-                // Warning: If no sRGB format is found, colors might still look off 
-                // unless you manually convert to sRGB in the fragment shader.
                 log::warn!("No sRGB surface format found, falling back to {:?}", surface_caps.formats[0]);
                 surface_caps.formats[0]
             });
@@ -140,9 +130,10 @@ impl State {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        surface.configure(&device, &config); // 首次配置 surface
+        surface.configure(&device, &config);
 
-        // --- 相机设置 ---
+        // ... (camera, pipelines, initial data setup remains the same)
+
         let mut camera = Camera::new(size.width, size.height);
         let camera_uniform = CameraUniform {
             view_proj: camera.build_view_projection_matrix().to_cols_array_2d(),
@@ -160,7 +151,7 @@ impl State {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX, // 相机矩阵只在顶点着色器中使用
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -194,16 +185,14 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(CIRCLES_WGSL.into()),
         });
 
-
         // --- 渲染管线布局 ---
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[
-                &camera_bind_group_layout, // 绑定组 0 用于相机
+                &camera_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
-
 
         // --- 线段渲染管线 ---
         let line_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -213,7 +202,7 @@ impl State {
                 module: &lines_shader_module,
                 entry_point: Some("vs_main"),
                 buffers: &[
-                    LineVertex::layout(), // 仅需要 LineVertex 的布局
+                    LineVertex::layout(),
                 ],
                 compilation_options: Default::default(),
             },
@@ -222,23 +211,23 @@ impl State {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: texture_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING), // 启用 Alpha 混合
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList, // 绘制线条列表 (每两个顶点构成一条线)
+                topology: wgpu::PrimitiveTopology::LineList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // 线条通常不需要背面剔除
+                cull_mode: None,
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState {
-                count: 1, // 禁用多重采样
+                count: 1,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -254,8 +243,8 @@ impl State {
                 module: &circles_shader_module,
                 entry_point: Some("vs_main"),
                 buffers: &[
-                    Vertex2D::layout(),      // 基础四边形顶点数据
-                    CircleInstance::layout(), // 每实例数据
+                    Vertex2D::layout(),
+                    CircleInstance::layout(),
                 ],
                 compilation_options: Default::default(),
             },
@@ -264,7 +253,7 @@ impl State {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: texture_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING), // 启用 Alpha 混合以实现圆形平滑边缘
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -273,14 +262,14 @@ impl State {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back), // 剔除四边形的背面
+                cull_mode: Some(wgpu::Face::Back),
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState {
-                count: 1, // 禁用多重采样
+                count: 1,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -307,7 +296,7 @@ impl State {
             },
             CircleInstance {
                 position: [0.0, 150.0].into(),
-                radius_scale: BASE_NODE_RADIUS * 1.5, // 大一些的节点
+                radius_scale: BASE_NODE_RADIUS * 1.5,
                 color: Color::from((255, 200, 0)).into_linear_rgba(),
             },
         ];
@@ -336,15 +325,11 @@ impl State {
             }
         );
 
-        // 线路连接示例
         let line_vertices = vec![
-            // 线 1: 节点 0 <-> 节点 1
             LineVertex { position: circle_instances[0].position.into(), color: Color::from((200, 200, 200)).into_linear_rgba() },
             LineVertex { position: circle_instances[1].position.into(), color: Color::from((200, 200, 200)).into_linear_rgba() },
-            // 线 2: 节点 1 <-> 节点 2
             LineVertex { position: circle_instances[1].position.into(), color: Color::from((200, 200, 200)).into_linear_rgba() },
             LineVertex { position: circle_instances[2].position.into(), color: Color::from((200, 200, 200)).into_linear_rgba() },
-            // 线 3: 节点 0 <-> 节点 3
             LineVertex { position: circle_instances[0].position.into(), color: Color::from((200, 200, 200)).into_linear_rgba() },
             LineVertex { position: circle_instances[3].position.into(), color: Color::from((200, 200, 200)).into_linear_rgba() },
         ];
@@ -358,63 +343,30 @@ impl State {
         );
 
         Ok( Self {
-            window,
-            surface,
-            device,
-            queue,
-            config,
-            is_surface_configured: false,
-
-            camera,
-            camera_buffer,
-            camera_bind_group,
-            camera_uniform,
-            camera_needs_update: true,
-
-            line_render_pipeline,
-            circle_render_pipeline,
-
-            circle_instances,
-            circle_instance_buffer,
-            quad_vertex_buffer,
-            quad_index_buffer,
-
-            line_vertices,
-            line_vertex_buffer,
-
-            mouse_current_pos_screen: Vec2::ZERO,
-            is_mouse_left_pressed: false,
-
-            // FPS counter + Glyphon
-            last_frame_instant: Instant::now(),
-            frame_count_in_second: 0,
-            current_fps: 0,
+            surface, device, queue, config, is_surface_configured: false,
+            camera, camera_buffer, camera_bind_group, camera_uniform, camera_needs_update: true,
+            line_render_pipeline, circle_render_pipeline,
+            circle_instances, circle_instance_buffer, quad_vertex_buffer, quad_index_buffer,
+            line_vertices, line_vertex_buffer,
+            mouse_current_pos_screen: Vec2::ZERO, is_mouse_left_pressed: false,
+            last_frame_instant: Instant::now(), frame_count_in_second: 0, current_fps: 0,
         })
     }
 
-    fn window(&self) -> &Window {
-        &self.window
-    }
-
-    /// 窗口大小改变时调用
     fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             log::info!("Resize {}, {}", width, height);
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
-            // 通知相机更新宽高比
             self.camera.update_aspect_ratio(width, height);
             self.camera_needs_update = true;
-
             self.is_surface_configured = true;
-            self.window.request_redraw(); // 请求重绘
+            // No request_redraw here, it's App's responsibility
         }
     }
 
-    /// 更新渲染数据（目前只更新相机）
     fn update(&mut self) -> bool {
-        // 如果相机需要更新，则重新计算 view_proj 矩阵并写入 buffer
         if self.camera_needs_update {
             self.camera_uniform.view_proj = self.camera.build_view_projection_matrix().to_cols_array_2d();
             self.queue.write_buffer(
@@ -423,14 +375,12 @@ impl State {
                 bytemuck::cast_slice(&[self.camera_uniform]),
             );
             self.camera_needs_update = false;
-            return true; // 状态已更新，需要重绘
+            return true;
         }
         false
     }
 
-    /// 执行渲染操作
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        // 如果 surface 尚未配置，则不能渲染
         if !self.is_surface_configured {
             return Ok(());
         }
@@ -475,55 +425,182 @@ impl State {
                 occlusion_query_set: None,
             });
 
-            // 绑定相机 Uniform
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            // --- 绘制线段 ---
             render_pass.set_pipeline(&self.line_render_pipeline);
             render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
             render_pass.draw(0..self.line_vertices.len() as u32, 0..1);
 
-            // --- 绘制圆形 (实例渲染) ---
             render_pass.set_pipeline(&self.circle_render_pipeline);
-            render_pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..)); // 绑定基础四边形顶点
-            render_pass.set_vertex_buffer(1, self.circle_instance_buffer.slice(..)); // 绑定实例数据
-            render_pass.set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16); // 绑定索引
+            render_pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.circle_instance_buffer.slice(..));
+            render_pass.set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(
-                0..Vertex2D::QUAD_INDICES.len() as u32, // 绘制基础四边形的索引范围
+                0..Vertex2D::QUAD_INDICES.len() as u32,
                 0,
-                0..self.circle_instances.len() as u32, // 为每个实例绘制
+                0..self.circle_instances.len() as u32,
             );
-        } // `render_pass` 结束，因为它需要 `encoder` 的可变借用
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
     }
-}
 
-pub struct App {
-    #[cfg(target_arch = "wasm32")]
-    proxy: Option<winit::event_loop::EventLoopProxy<Option<State>>>, // proxy now sends Option<State>
-    state: Option<State>,
-}
+    pub fn process_command(&mut self, command: UserCommand) {
+        match command {
+            UserCommand::SetFullTopology { nodes, links } => {
+                log::info!("Setting full topology with {} nodes and {} links.", nodes.len(), links.len());
 
-impl App {
-    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<Option<State>>) -> Self {
-        #[cfg(target_arch = "wasm32")]
-        let proxy = Some(event_loop.create_proxy());
-        Self {
-            state: None,
-            #[cfg(target_arch = "wasm32")]
-            proxy,
+                let node_id_to_idx: HashMap<u32, usize> = nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, node)| (node.id, i))
+                    .collect();
+
+                self.circle_instances = nodes
+                    .into_iter()
+                    .map(|node| CircleInstance {
+                        position: node.position.into(),
+                        radius_scale: node.radius_scale,
+                        color: Color::from((node.color[0], node.color[1], node.color[2])).into_linear_rgba(),
+                    })
+                    .collect();
+
+                self.line_vertices.clear();
+                for link in links {
+                    if let (Some(&source_idx), Some(&target_idx)) = (
+                        node_id_to_idx.get(&link.source_id),
+                        node_id_to_idx.get(&link.target_id),
+                    ) {
+                        let line_color = Color::from((link.color[0], link.color[1], link.color[2]));
+                        self.line_vertices.push(LineVertex {
+                            position: self.circle_instances[source_idx].position,
+                            color: line_color.into_linear_rgba(),
+                        });
+                        self.line_vertices.push(LineVertex {
+                            position: self.circle_instances[target_idx].position,
+                            color: line_color.into_linear_rgba(),
+                        });
+                    } else {
+                        log::warn!("Link references non-existent node ID. Source: {}, Target: {}", link.source_id, link.target_id);
+                    }
+                }
+
+                self.update_gpu_buffers();
+            }
+            UserCommand::AddNode(node_data) => {
+                // Implement add node logic
+                log::info!("Add node command received: {:?}", node_data);
+            }
+            UserCommand::RemoveNode(node_id) => {
+                // Implement remove node logic
+                log::info!("Remove node command received: {:?}", node_id);
+            }
+            UserCommand::StateInitialized => {
+                // This command is handled in App::user_event
+            }
+        }
+    }
+
+    fn update_gpu_buffers(&mut self) {
+        let circle_data = bytemuck::cast_slice(&self.circle_instances);
+        let line_data = bytemuck::cast_slice(&self.line_vertices);
+
+        if self.circle_instance_buffer.size() < circle_data.len() as u64 {
+            self.circle_instance_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Circle Instance Buffer (Resized)"),
+                contents: circle_data,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+        } else {
+            self.queue.write_buffer(&self.circle_instance_buffer, 0, circle_data);
+        }
+
+        if self.line_vertex_buffer.size() < line_data.len() as u64 {
+            self.line_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Line Vertex Buffer (Resized)"),
+                contents: line_data,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+        } else {
+            self.queue.write_buffer(&self.line_vertex_buffer, 0, line_data);
         }
     }
 }
 
-impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<State>
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NodeData {
+    pub id: u32,
+    pub position: [f32; 2],
+    pub radius_scale: f32,
+    pub color: [u8; 3],
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LinkData {
+    pub source_id: u32,
+    pub target_id: u32,
+    pub color: [u8; 3],
+}
+
+#[derive(Deserialize, Debug)]
+pub struct FullTopologyData {
+    pub nodes: Vec<NodeData>,
+    pub links: Vec<LinkData>,
+}
+
+#[derive(Debug)]
+enum UserCommand {
+    SetFullTopology {
+        nodes: Vec<NodeData>,
+        links: Vec<LinkData>,
+    },
+    AddNode(NodeData),
+    RemoveNode(u32),
+    StateInitialized, // Notifies App that State setup is complete
+}
+
+
+pub struct App {
+    window: Option<Arc<Window>>, // App now owns the Arc<Window>
+    state: Arc<Mutex<Option<State>>>, // Wrapped in Arc<Mutex> for interior mutability and potential Send (if State itself were Send)
+    #[cfg(target_arch = "wasm32")]
+    proxy: Option<EventLoopProxy<UserCommand>>,
+}
+
+impl App {
+    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<UserCommand>) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let app_proxy = event_loop.create_proxy();
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let wasm_api_instance = WasmApi { proxy: app_proxy.clone() };
+            if WASM_API_INSTANCE.set(wasm_api_instance).is_err() {
+                log::warn!("WASM_API_INSTANCE was already set. This should only happen once.");
+            }
+        }
+
+        Self {
+            window: None,
+            state: Arc::new(Mutex::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            proxy: Some(app_proxy),
+        }
+    }
+
+    fn get_window_size(&self) -> Option<winit::dpi::PhysicalSize<u32>> {
+        self.window.as_ref().map(|w| w.inner_size())
+    }
+}
+
+impl ApplicationHandler<UserCommand> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let mut window_attributes = Window::default_attributes()
-            .with_title("WDMView Graph Topology"); // Set window title
+            .with_title("WDMView Graph Topology");
 
         #[cfg(target_arch = "wasm32")]
         {
@@ -540,55 +617,65 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
         }
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
+        self.window = Some(window.clone()); // App now holds the Arc<Window> instance
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut state = pollster::block_on(State::new(window)).unwrap(); // Add mut here
-            let current_size = state.window().inner_size();
-            state.resize(current_size.width, current_size.height); // <-- 强制初始化尺寸
-            state.window().request_redraw();
-            self.state = Some(state);
+            let mut state = pollster::block_on(State::new(window)).unwrap();
+            let current_size = self.get_window_size().unwrap();
+            state.resize(current_size.width, current_size.height);
+            self.state.lock().unwrap().replace(state); // Set state within the Mutex
+            // Request redraw using App's window handle
+            self.window.as_ref().unwrap().request_redraw();
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            // For wasm, `resumed` is called once the app starts.
-            // We need to pass the window Arc to the async task which creates state
-            // and then sends it back to the main thread via the proxy.
-            if let Some(proxy) = self.proxy.take() {
-                wasm_bindgen_futures::spawn_local(async move {
-                    let state_result = State::new(window.clone()).await; // Clone window for async context
-                    match state_result {
-                        Ok(state) => {
-                            if proxy.send_event(Some(state)).is_err() {
-                                log::error!("Failed to send new State via proxy (channel closed).");
-                            }
-                        },
-                        Err(e) => {
-                            log::error!("Failed to create State: {:?}", e);
-                            if proxy.send_event(None).is_err() { // Send None to indicate failure
-                                log::error!("Failed to send error state via proxy.");
-                            }
+            // Clone Arc<Mutex<Option<State>>> and Arc<Window> for the async task
+            let state_arc_for_spawn = self.state.clone();
+            let window_for_state_new = window.clone(); // Pass clone to State::new
+            let proxy_for_init_notification = self.proxy.as_ref().expect("App proxy not set").clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                match State::new(window_for_state_new.clone()).await { // Use clone for State::new
+                    Ok(mut state_instance) => {
+                        log::info!("WASM State created in async task.");
+                        let initial_size = window_for_state_new.inner_size();
+                        state_instance.resize(initial_size.width, initial_size.height);
+
+                        {
+                            let mut app_state_guard = state_arc_for_spawn.lock().unwrap();
+                            app_state_guard.replace(state_instance);
                         }
-                    }
-                });
-            }
+                        log::info!("WASM State assigned to App. Sending initialization notification.");
+                        if proxy_for_init_notification.send_event(UserCommand::StateInitialized).is_err() {
+                            log::error!("Failed to send StateInitialized event.");
+                        }
+                    },
+                    Err(e) => log::error!("Failed to create State in WASM: {:?}", e),
+                }
+            });
         }
     }
 
-    #[allow(unused_mut)]
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut event: Option<State>) {
-        // This is where State created in WASM async task is received
-        // Or if error, None is received
-        if let Some(mut state_instance) = event.take() { // take() the Option<State> out
-            let current_size = state_instance.window().inner_size();
-            state_instance.resize(current_size.width, current_size.height); // <-- 强制初始化尺寸
-            log::info!("WASM State initialized!");
-            state_instance.window().request_redraw(); // Request redraw after init
-            self.state = Some(state_instance); // Assign after resize and redraw
-        } else {
-            log::error!("Failed to initialize State in user_event (WASM).");
-            // Optionally, handle error, e.g., display a message to the user
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserCommand) {
+        match event {
+            UserCommand::StateInitialized => {
+                log::info!("WASM State initialized and ready.");
+                if let Some(w_handle) = self.window.as_ref() {
+                    w_handle.request_redraw();
+                }
+            }
+            _ => {
+                if let Some(state) = &mut *self.state.lock().unwrap() {
+                    state.process_command(event);
+                    if let Some(w_handle) = self.window.as_ref() {
+                        w_handle.request_redraw(); // Request redraw after processing command
+                    }
+                } else {
+                    log::warn!("Received a command before state was initialized (via proxy). Ignoring: {:?}", event);
+                }
+            }
         }
     }
 
@@ -598,13 +685,12 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let state = match &mut self.state {
-            Some(s) => s,
-            None => {
-                log::warn!("Window event received before State was initialized, ignoring.");
-                return;
-            },
+        let Some(state) = &mut *self.state.lock().unwrap() else {
+            log::warn!("Window event received before State was initialized, ignoring.");
+            return;
         };
+
+        let window_handle = self.window.as_ref().unwrap(); // Use App's window handle
 
         let mut needs_redraw = false;
 
@@ -612,21 +698,16 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 state.resize(size.width, size.height);
-                needs_redraw = true; // Resize implicitly requires redraw
+                needs_redraw = true;
             }
             WindowEvent::RedrawRequested => {
-                if state.update() { // If update causes a state change like camera movement affecting uniform buffer
-                    // A true from update already means a redraw is needed, and `update` internally
-                    // already writes to the camera buffer.
+                if state.update() {
+                    needs_redraw = true; // Still need to redraw even if update indicates change
                 }
                 match state.render() {
                     Ok(_) => {}
-                    // 当 surface 丢失，可能是因为窗口设置改变或设备被拔出。
-                    // 这种情况通常需要重新配置 surface。
                     Err(wgpu::SurfaceError::Lost) => state.resize(state.config.width, state.config.height),
-                    // 当系统内存不足时
                     Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                    // 其他所有错误（比如 `Timeout` 和 `Outdated`）的发生都表明 surface 需要重新配置但不是紧急情况
                     Err(e) => log::error!("{:?}", e),
                 }
             }
@@ -634,7 +715,6 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
                 match (button, mouse_button_state.is_pressed()) {
                     (MouseButton::Left, true) => {
                         state.is_mouse_left_pressed = true;
-                        // 开始拖拽平移，记录鼠标当前世界坐标作为参考点
                         state.camera.start_panning(state.mouse_current_pos_screen);
                         state.camera_needs_update = true;
                         needs_redraw = true;
@@ -649,7 +729,6 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
             WindowEvent::CursorMoved { position, .. } => {
                 state.mouse_current_pos_screen = Vec2::new(position.x as f32, position.y as f32);
                 if state.is_mouse_left_pressed {
-                    // 如果正在拖拽，进行平移操作
                     state.camera.pan(state.mouse_current_pos_screen);
                     state.camera_needs_update = true;
                     needs_redraw = true;
@@ -657,8 +736,8 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
             },
             WindowEvent::MouseWheel { delta, .. } => {
                 let y_scroll_delta = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => y * 10.0, // 典型滚动，转换为更显著的量
-                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32, // 精确像素滚动
+                    MouseScrollDelta::LineDelta(x, y) => y * 10.0,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
                 };
 
                 let zoom_factor = if y_scroll_delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
@@ -677,10 +756,9 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
                     },
                 ..
             } => {
-                if key_state.is_pressed() && !repeat { // Only trigger on initial press
-                    // Example: Basic keyboard pan/zoom for testing
+                if key_state.is_pressed() && !repeat {
                     let mut changed = false;
-                    let pan_speed = 10.0 / state.camera.zoom; // Move faster when zoomed out
+                    let pan_speed = 10.0 / state.camera.zoom;
                     let zoom_factor = 1.1;
 
                     match code {
@@ -704,7 +782,7 @@ impl ApplicationHandler<Option<State>> for App { // UserEvent is now Option<Stat
         }
 
         if needs_redraw {
-            state.window.request_redraw();
+            window_handle.request_redraw();
         }
     }
 }
@@ -716,8 +794,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        console_log::init_with_level(log::Level::Info).unwrap_throw();
-        log::info!("Success init wasm.");
+        log::info!("Starting WDMView application.");
     }
 
     let event_loop = EventLoop::with_user_event().build()?;
@@ -734,7 +811,47 @@ pub fn run() -> anyhow::Result<()> {
 #[wasm_bindgen(start)]
 pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
     console_error_panic_hook::set_once();
+    console_log::init_with_level(log::Level::Info).unwrap_throw();
+    log::info!("WASM started: Calling run().");
     run().unwrap_throw();
 
     Ok(())
 }
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+#[derive(Clone, Debug)] // Added Debug for better logging
+pub struct WasmApi {
+    proxy: EventLoopProxy<UserCommand>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WasmApi {
+    #[wasm_bindgen(js_name = setFullTopology)]
+    pub fn set_full_topology(&self, topology_json: &str) -> Result<(), JsValue> {
+        let parsed_topology: FullTopologyData = serde_json::from_str(topology_json)
+            .map_err(|e| JsValue::from_str(&format!("JSON parsing error: {}", e)))?;
+
+        let command = UserCommand::SetFullTopology {
+            nodes: parsed_topology.nodes,
+            links: parsed_topology.links,
+        };
+
+        log::info!("Received SetFullTopology command from JS.");
+
+        if self.proxy.send_event(command).is_err() {
+            return Err(JsValue::from_str("Failed to send command to event loop."));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = getWasmApi)]
+pub fn get_wasm_api() -> Result<WasmApi, JsValue> {
+    WASM_API_INSTANCE.get()
+        .cloned()
+        .ok_or_else(|| JsValue::from_str("WasmApi is not initialized. Call run_web() first."))
+}
+

@@ -11,6 +11,7 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4], // 视图投影矩阵
 }
 
+#[derive(Debug)]
 pub struct Camera {
     pub position: Vec2, // 相机在世界坐标中的中心点
     pub zoom: f32,      // 缩放级别。1.0 为默认，>1.0 放大，<1.0 缩小。
