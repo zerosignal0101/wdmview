@@ -69,8 +69,6 @@ struct State {
     last_frame_instant: instant::Instant,
     frame_count_in_second: u32,
     current_fps: u32,
-
-    needs_shader_srgb_output_conversion: bool,
 }
 
 impl State {
@@ -363,7 +361,6 @@ impl State {
             line_vertices, line_vertex_buffer,
             mouse_current_pos_screen: Vec2::ZERO, is_mouse_left_pressed: false,
             last_frame_instant: Instant::now(), frame_count_in_second: 0, current_fps: 0,
-            needs_shader_srgb_output_conversion,
         })
     }
 
@@ -462,7 +459,7 @@ impl State {
         Ok(())
     }
 
-    pub fn process_command(&mut self, command: UserCommand) {
+    fn process_command(&mut self, command: UserCommand) {
         match command {
             UserCommand::SetFullTopology { nodes, links } => {
                 log::info!("Setting full topology with {} nodes and {} links.", nodes.len(), links.len());
@@ -578,7 +575,7 @@ enum UserCommand {
 }
 
 
-pub struct App {
+struct App {
     window: Option<Arc<Window>>,
     state: Arc<Mutex<Option<State>>>, // Wrapped in Arc<Mutex> for interior mutability and potential Send (if State itself were Send)
     #[cfg(target_arch = "wasm32")]
@@ -586,7 +583,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<UserCommand>) -> Self {
+    fn new(#[cfg(target_arch = "wasm32")] event_loop: &EventLoop<UserCommand>) -> Self {
         #[cfg(target_arch = "wasm32")]
         let app_proxy = event_loop.create_proxy();
 
@@ -606,6 +603,7 @@ impl App {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn get_window_size(&self) -> Option<winit::dpi::PhysicalSize<u32>> {
         self.window.as_ref().map(|w| w.inner_size())
     }
