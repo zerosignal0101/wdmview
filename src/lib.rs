@@ -69,6 +69,8 @@ struct State {
     last_frame_instant: instant::Instant,
     frame_count_in_second: u32,
     current_fps: u32,
+
+    needs_shader_srgb_output_conversion: bool,
 }
 
 impl State {
@@ -119,11 +121,15 @@ impl State {
                 surface_caps.formats[0]
             });
 
+        // 确定是否需要着色器进行 sRGB 输出转换
+        let needs_shader_srgb_output_conversion = !texture_format.is_srgb();
+
         log::info!(
-            "Using {} ({:?}, Preferred Format: {:?})",
+            "Using {} ({:?}, Target Format: {:?}), Needs Shader sRGB Output Conversion: {}",
             adapter_info.name,
             adapter_info.backend,
             texture_format,
+            needs_shader_srgb_output_conversion
         );
 
         let config = wgpu::SurfaceConfiguration {
@@ -138,11 +144,12 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // ... (camera, pipelines, initial data setup remains the same)
-
+        #[allow(unused_mut)]
         let mut camera = Camera::new(size.width, size.height);
         let camera_uniform = CameraUniform {
             view_proj: camera.build_view_projection_matrix().to_cols_array_2d(),
+            needs_srgb_output_conversion: needs_shader_srgb_output_conversion as u32,
+            _padding: [0; 3],
         };
 
         let camera_buffer = device.create_buffer_init(
@@ -157,7 +164,7 @@ impl State {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -356,6 +363,7 @@ impl State {
             line_vertices, line_vertex_buffer,
             mouse_current_pos_screen: Vec2::ZERO, is_mouse_left_pressed: false,
             last_frame_instant: Instant::now(), frame_count_in_second: 0, current_fps: 0,
+            needs_shader_srgb_output_conversion,
         })
     }
 
@@ -571,7 +579,7 @@ enum UserCommand {
 
 
 pub struct App {
-    window: Option<Arc<Window>>, // App now owns the Arc<Window>
+    window: Option<Arc<Window>>,
     state: Arc<Mutex<Option<State>>>, // Wrapped in Arc<Mutex> for interior mutability and potential Send (if State itself were Send)
     #[cfg(target_arch = "wasm32")]
     proxy: Option<EventLoopProxy<UserCommand>>,
@@ -623,7 +631,7 @@ impl ApplicationHandler<UserCommand> for App {
         }
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-        self.window = Some(window.clone()); // App now holds the Arc<Window> instance
+        self.window = Some(window.clone());
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -703,7 +711,7 @@ impl ApplicationHandler<UserCommand> for App {
             return;
         };
 
-        let window_handle = self.window.as_ref().unwrap(); // Use App's window handle
+        let window_handle = self.window.as_ref().unwrap();
 
         let mut needs_redraw = false;
 
@@ -837,7 +845,7 @@ pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-#[derive(Clone, Debug)] // Added Debug for better logging
+#[derive(Clone, Debug)]
 pub struct WasmApi {
     proxy: EventLoopProxy<UserCommand>,
 }
@@ -875,12 +883,10 @@ pub fn get_wasm_api() -> Result<WasmApi, JsValue> {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = getWasmReadyPromise)]
 pub fn get_wasm_ready_promise() -> Result<Promise, JsValue> {
-    // We take the channel from the static OnceCell. This means this function can only be called once
-    // to obtain the promise. Subsequent calls would return an error.
     let (_, receiver) = WASM_READY_FLUME_CHANNEL.get()
         .ok_or_else(|| JsValue::from_str("WASM ready channel already taken or not initialized. Make sure getWasmApi() is called only once."))?;
 
-    // Convert the Rust Future obtained from the flume receiver into a j_sys::Promise
+    // Convert the Rust Future obtained from the flume receiver into a js_sys::Promise
     let ready_promise = future_to_promise(async move {
         receiver.recv_async().await.unwrap_throw(); // Wait for the signal
         Ok(JsValue::NULL) // Resolve with null

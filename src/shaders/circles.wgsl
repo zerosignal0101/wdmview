@@ -1,9 +1,19 @@
 // 通用相机 Uniform 结构
 struct CameraUniform {
     view_proj: mat4x4<f32>,
+    needs_srgb_output_conversion: u32, // 从 Rust 传递的标志
 };
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
+
+// 转换线性颜色到 sRGB 颜色（用于在非 sRGB 表面上正确显示）
+fn linear_to_srgb(c: f32) -> f32 {
+    if c < 0.0031308 { // This value is 0.04045 / 12.92
+        return c * 12.92;
+    } else {
+        return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    }
+}
 
 // 基础四边形顶点输入 (对应 Vertex2D)
 struct QuadVertexInput {
@@ -64,6 +74,12 @@ fn fs_main(in: CircleFragmentInput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // 返回经过 alpha 混合的颜色
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    var final_color = vec4<f32>(in.color.rgb, in.color.a * alpha);
+    // 根据标志，将线性颜色转换为 sRGB 颜色
+    if camera.needs_srgb_output_conversion == 1u {
+        final_color.r = linear_to_srgb(final_color.r);
+        final_color.g = linear_to_srgb(final_color.g);
+        final_color.b = linear_to_srgb(final_color.b);
+    }
+    return final_color;
 }

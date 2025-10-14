@@ -9,6 +9,8 @@ use bytemuck::{Pod, Zeroable};
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4], // 视图投影矩阵
+    pub needs_srgb_output_conversion: u32, // 0 for false, 1 for true
+    pub _padding: [u32; 3], // 填充到 16 字节边界，使 CameraUniform 总大小为 80 字节
 }
 
 #[derive(Debug)]
@@ -77,7 +79,7 @@ impl Camera {
 
                 // 计算每个像素在世界坐标中的实际距离
                 let world_visible_width = (2.0 / self.zoom) * self.aspect_ratio;
-                let world_visible_height = (2.0 / self.zoom);
+                let world_visible_height = 2.0 / self.zoom;
 
                 let world_units_per_pixel_x = world_visible_width / self.viewport_size.x;
                 let world_units_per_pixel_y = world_visible_height / self.viewport_size.y;
