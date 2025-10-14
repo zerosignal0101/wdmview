@@ -1,9 +1,8 @@
-// src/lib.rs (Final Proposed Code)
-use std::{collections::HashMap, sync::Arc, sync::Mutex}; // Added Mutex
+use std::{collections::HashMap, sync::Arc, sync::Mutex};
 use winit::{
     application::ApplicationHandler,
     event::*,
-    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy}, // Added EventLoopProxy
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::{KeyCode, PhysicalKey, SmolStr},
     window::Window,
 };
@@ -14,7 +13,12 @@ use wgpu::util::DeviceExt;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
-use once_cell::sync::OnceCell; // For global WasmApi instance
+#[cfg(target_arch = "wasm32")]
+use once_cell::sync::OnceCell;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::{future_to_promise}; // Import future_to_promise
+#[cfg(target_arch = "wasm32")]
+use js_sys::Promise;
 
 mod models;
 mod camera;
@@ -31,9 +35,11 @@ const CIRCLES_WGSL: &str = include_str!("./shaders/circles.wgsl");
 #[cfg(target_arch = "wasm32")]
 static WASM_API_INSTANCE: OnceCell<WasmApi> = OnceCell::new();
 
+#[cfg(target_arch = "wasm32")]
+static WASM_READY_FLUME_CHANNEL: OnceCell<(flume::Sender<()>, flume::Receiver<()>)> = OnceCell::new();
+
 #[derive(Debug)]
 struct State {
-    // Removed Arc<Window> from here
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -662,6 +668,13 @@ impl ApplicationHandler<UserCommand> for App {
         match event {
             UserCommand::StateInitialized => {
                 log::info!("WASM State initialized and ready.");
+                // Signal to the promise resolver
+                #[cfg(target_arch = "wasm32")]
+                if let Some((sender, _)) = WASM_READY_FLUME_CHANNEL.get() {
+                    if let Err(e) = sender.send(()) {
+                        log::error!("Failed to send WASM ready signal: {:?}", e);
+                    }
+                }
                 if let Some(w_handle) = self.window.as_ref() {
                     w_handle.request_redraw();
                 }
@@ -794,7 +807,13 @@ pub fn run() -> anyhow::Result<()> {
     }
     #[cfg(target_arch = "wasm32")]
     {
+        console_error_panic_hook::set_once();
+        console_log::init_with_level(log::Level::Info).unwrap_throw();
         log::info!("Starting WDMView application.");
+        let (sender, receiver) = flume::unbounded();
+        WASM_READY_FLUME_CHANNEL.set((sender, receiver))
+            .expect("Failed to initialize WASM_READY_CHANNEL. This should not happen.");
+        log::info!("WASM ready channel created and stored.");
     }
 
     let event_loop = EventLoop::with_user_event().build()?;
@@ -810,8 +829,6 @@ pub fn run() -> anyhow::Result<()> {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
 pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
-    console_error_panic_hook::set_once();
-    console_log::init_with_level(log::Level::Info).unwrap_throw();
     log::info!("WASM started: Calling run().");
     run().unwrap_throw();
 
@@ -853,5 +870,23 @@ pub fn get_wasm_api() -> Result<WasmApi, JsValue> {
     WASM_API_INSTANCE.get()
         .cloned()
         .ok_or_else(|| JsValue::from_str("WasmApi is not initialized. Call run_web() first."))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = getWasmReadyPromise)]
+pub fn get_wasm_ready_promise() -> Result<Promise, JsValue> {
+    // We take the channel from the static OnceCell. This means this function can only be called once
+    // to obtain the promise. Subsequent calls would return an error.
+    let (_, receiver) = WASM_READY_FLUME_CHANNEL.get()
+        .ok_or_else(|| JsValue::from_str("WASM ready channel already taken or not initialized. Make sure getWasmApi() is called only once."))?;
+
+    // Convert the Rust Future obtained from the flume receiver into a j_sys::Promise
+    let ready_promise = future_to_promise(async move {
+        receiver.recv_async().await.unwrap_throw(); // Wait for the signal
+        Ok(JsValue::NULL) // Resolve with null
+    });
+
+    // 将 Rust Future 转换为 JS Promise
+    Ok(ready_promise)
 }
 
