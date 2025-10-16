@@ -11,7 +11,6 @@ use wgpu::util::DeviceExt;
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
 use crate::camera::{Camera, CameraUniform};
 use crate::color::Color;
-use crate::ui_events::UserCommand;
 
 
 const BASE_NODE_RADIUS: f32 = 25.0;
@@ -20,28 +19,28 @@ const CIRCLES_WGSL: &str = include_str!("./shaders/circles.wgsl");
 
 #[derive(Debug)]
 pub struct State {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub surface: wgpu::Surface<'static>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub is_surface_configured: bool,
 
     pub camera: Camera,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    camera_uniform: CameraUniform,
+    pub camera_buffer: wgpu::Buffer,
+    pub camera_bind_group: wgpu::BindGroup,
+    pub camera_uniform: CameraUniform,
     pub camera_needs_update: bool,
 
-    line_render_pipeline: wgpu::RenderPipeline,
-    circle_render_pipeline: wgpu::RenderPipeline,
+    pub line_render_pipeline: wgpu::RenderPipeline,
+    pub circle_render_pipeline: wgpu::RenderPipeline,
 
-    circle_instances: Vec<CircleInstance>,
-    circle_instance_buffer: wgpu::Buffer,
-    quad_vertex_buffer: wgpu::Buffer,
-    quad_index_buffer: wgpu::Buffer,
+    pub circle_instances: Vec<CircleInstance>,
+    pub circle_instance_buffer: wgpu::Buffer,
+    pub quad_vertex_buffer: wgpu::Buffer,
+    pub quad_index_buffer: wgpu::Buffer,
 
-    line_vertices: Vec<LineVertex>,
-    line_vertex_buffer: wgpu::Buffer,
+    pub line_vertices: Vec<LineVertex>,
+    pub line_vertex_buffer: wgpu::Buffer,
 
     pub mouse_current_pos_screen: Vec2,
     pub is_mouse_left_pressed: bool,
@@ -437,86 +436,5 @@ impl State {
         output.present();
 
         Ok(())
-    }
-
-    pub fn process_command(&mut self, command: UserCommand) {
-        match command {
-            UserCommand::SetFullTopology { nodes, links } => {
-                log::info!("Setting full topology with {} nodes and {} links.", nodes.len(), links.len());
-
-                let node_id_to_idx: HashMap<u32, usize> = nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, node)| (node.id, i))
-                    .collect();
-
-                self.circle_instances = nodes
-                    .into_iter()
-                    .map(|node| CircleInstance {
-                        position: node.position.into(),
-                        radius_scale: node.radius_scale,
-                        color: Color::from((node.color[0], node.color[1], node.color[2])).into_linear_rgba(),
-                    })
-                    .collect();
-
-                self.line_vertices.clear();
-                for link in links {
-                    if let (Some(&source_idx), Some(&target_idx)) = (
-                        node_id_to_idx.get(&link.source_id),
-                        node_id_to_idx.get(&link.target_id),
-                    ) {
-                        let line_color = Color::from((link.color[0], link.color[1], link.color[2]));
-                        self.line_vertices.push(LineVertex {
-                            position: self.circle_instances[source_idx].position,
-                            color: line_color.into_linear_rgba(),
-                        });
-                        self.line_vertices.push(LineVertex {
-                            position: self.circle_instances[target_idx].position,
-                            color: line_color.into_linear_rgba(),
-                        });
-                    } else {
-                        log::warn!("Link references non-existent node ID. Source: {}, Target: {}", link.source_id, link.target_id);
-                    }
-                }
-
-                self.update_gpu_buffers();
-            }
-            UserCommand::AddNode(node_data) => {
-                // Implement add node logic
-                log::info!("Add node command received: {:?}", node_data);
-            }
-            UserCommand::RemoveNode(node_id) => {
-                // Implement remove node logic
-                log::info!("Remove node command received: {:?}", node_id);
-            }
-            UserCommand::StateInitialized => {
-                // This command is handled in App::user_event
-            }
-        }
-    }
-
-    fn update_gpu_buffers(&mut self) {
-        let circle_data = bytemuck::cast_slice(&self.circle_instances);
-        let line_data = bytemuck::cast_slice(&self.line_vertices);
-
-        if self.circle_instance_buffer.size() < circle_data.len() as u64 {
-            self.circle_instance_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Circle Instance Buffer (Resized)"),
-                contents: circle_data,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
-        } else {
-            self.queue.write_buffer(&self.circle_instance_buffer, 0, circle_data);
-        }
-
-        if self.line_vertex_buffer.size() < line_data.len() as u64 {
-            self.line_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Line Vertex Buffer (Resized)"),
-                contents: line_data,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
-        } else {
-            self.queue.write_buffer(&self.line_vertex_buffer, 0, line_data);
-        }
     }
 }
