@@ -17,13 +17,20 @@ const BASE_NODE_RADIUS: f32 = 25.0;
 const LINES_WGSL: &str = include_str!("./shaders/lines.wgsl");
 const CIRCLES_WGSL: &str = include_str!("./shaders/circles.wgsl");
 
-#[derive(Debug)]
 pub struct State {
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub is_surface_configured: bool,
+
+    // Glyphon related fields
+    pub glyphon_font_system: glyphon::FontSystem,
+    pub glyphon_viewport: glyphon::Viewport,
+    pub glyphon_swash_cache: glyphon::SwashCache,
+    pub glyphon_atlas: glyphon::TextAtlas,
+    pub glyphon_renderer: glyphon::TextRenderer,
+    pub glyphon_buffer: glyphon::Buffer,
 
     pub camera: Camera,
     pub camera_buffer: wgpu::Buffer,
@@ -121,6 +128,44 @@ impl State {
         };
         surface.configure(&device, &config);
 
+        // --- Glyphon Initialization ---
+        // --- Glyphon Initialization ---
+        let mut glyphon_font_system = glyphon::FontSystem::new_with_fonts([
+            glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
+                "../assets/fonts/Iced-Icons.ttf"
+            ))),
+            glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
+                "../assets/fonts/Roboto-Regular.ttf"
+            ))),
+            glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
+                "../assets/fonts/bootstrap-icons.ttf"
+            ))),
+        ]);
+        let glyphon_swash_cache = glyphon::SwashCache::new();
+        let glyphon_cache = glyphon::Cache::new(&device);
+        let glyphon_viewport = glyphon::Viewport::new(&device, &glyphon_cache);
+        let mut glyphon_atlas = glyphon::TextAtlas::new(&device, &queue, &glyphon_cache, texture_format);
+        let glyphon_renderer = glyphon::TextRenderer::new(&mut glyphon_atlas, &device, wgpu::MultisampleState::default(), None);
+
+        // Create a text buffer
+        let mut glyphon_buffer = glyphon::Buffer::new(
+            &mut glyphon_font_system,
+            glyphon::Metrics::new(30.0, 42.0), // Font size and line height
+        );
+
+        glyphon_buffer.set_size(
+            &mut glyphon_font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
+        glyphon_buffer.set_text(
+            &mut glyphon_font_system, 
+            "Hello world! 👋\nThis is rendered with 🦅 glyphon 🦁\nThe text below should be partially clipped.\na b c d e f g h i j k l m n o p q r s t u v w x y z", 
+            &glyphon::Attrs::new().family(glyphon::Family::SansSerif), 
+            glyphon::Shaping::Advanced
+        );
+        glyphon_buffer.shape_until_scroll(&mut glyphon_font_system, false);
+        
         #[allow(unused_mut)]
         let mut camera = Camera::new(size.width, size.height);
         let camera_uniform = CameraUniform {
@@ -334,6 +379,8 @@ impl State {
 
         Ok( Self {
             surface, device, queue, config, is_surface_configured: false,
+            glyphon_font_system, glyphon_swash_cache, glyphon_viewport,
+            glyphon_atlas, glyphon_renderer, glyphon_buffer,
             camera, camera_buffer, camera_bind_group, camera_uniform, camera_needs_update: true,
             line_render_pipeline, circle_render_pipeline,
             circle_instances, circle_instance_buffer, quad_vertex_buffer, quad_index_buffer,
@@ -349,6 +396,15 @@ impl State {
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
+
+            // Update glyphon buffer size
+            self.glyphon_buffer.set_size(
+                &mut self.glyphon_font_system,
+                Some(width as f32),
+                Some(height as f32),
+            );
+            self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+
             self.camera.update_aspect_ratio(width, height);
             self.camera_needs_update = true;
             self.is_surface_configured = true;
@@ -375,17 +431,6 @@ impl State {
             return Ok(());
         }
 
-        let output = self.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
         // --- FPS Calculation ---
         self.frame_count_in_second += 1;
         let now = Instant::now();
@@ -397,6 +442,50 @@ impl State {
             self.last_frame_instant = now;
         }
         // --- End FPS Calculation ---
+
+        // Update glyphon viewport
+        let width = self.config.width;
+        let height = self.config.height;
+        self.glyphon_viewport.update(&self.queue, glyphon::Resolution { width, height });
+
+        // Update glyphon text buffer
+        self.glyphon_buffer.set_text(
+            &mut self.glyphon_font_system,
+            &format!("FPS: {}", self.current_fps),
+            &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+
+        // Prepare glyphon text for rendering (uploads glyph textures)
+        self.glyphon_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.glyphon_font_system,
+            &mut self.glyphon_atlas,
+            &self.glyphon_viewport,
+            [glyphon::TextArea {
+                buffer: &self.glyphon_buffer,
+                left: 0.0,
+                top: 5.0,
+                scale: 1.0,
+                bounds: glyphon::TextBounds::default(),
+                default_color: glyphon::Color::rgb(255, 255, 255),
+                custom_glyphs: &[]
+            }],
+            &mut self.glyphon_swash_cache,
+        ).unwrap(); // Handle error gracefully in real app
+
+        let output = self.surface.get_current_texture()?;
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -430,10 +519,15 @@ impl State {
                 0,
                 0..self.circle_instances.len() as u32,
             );
+
+            // --- Draw Glyphon Text ---
+            self.glyphon_renderer.render(&self.glyphon_atlas, &self.glyphon_viewport, &mut render_pass).unwrap();
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        self.glyphon_atlas.trim();
 
         Ok(())
     }
