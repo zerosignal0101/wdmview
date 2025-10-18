@@ -65,6 +65,33 @@ impl Camera {
         world_coords_vec4.xy() / world_coords_vec4.w
     }
 
+    /// 将世界坐标点转换为屏幕像素坐标
+    /// 返回值 Vec2 的 x, y 是像素值，原点在左上角
+    pub fn world_to_screen(&self, world_coords: glam::Vec2) -> glam::Vec2 {
+        if self.viewport_size.x == 0.0 || self.viewport_size.y == 0.0 {
+            return Vec2::ZERO;
+        }
+        // 1. 将世界坐标点转换为齐次坐标 (z=0, w=1 for 2D)
+        let world_coords_vec4 = glam::Vec4::new(world_coords.x, world_coords.y, 0.0, 1.0);
+        // 2. 将世界坐标通过视图投影矩阵转换为裁剪空间坐标
+        let clip_pos_vec4 = self.build_view_projection_matrix() * world_coords_vec4;
+        // 3. 执行透视除法（对于正交投影，w 通常为 1，但保留通用性）
+        let ndc_pos = clip_pos_vec4.xy() / clip_pos_vec4.w;
+        // 4. 将 NDC (-1 to 1) 转换为屏幕坐标 (0 to width/height)
+        let screen_x = (ndc_pos.x * 0.5 + 0.5) * self.viewport_size.x as f32;
+        // 注意：NDC 的 Y 轴方向通常是向上为正，而屏幕坐标 Y 轴是向下为正
+        // 所以需要 1.0 - (ndc_pos.y * 0.5 + 0.5) 来进行 Y 轴翻转
+        let screen_y = (1.0 - (ndc_pos.y * 0.5 + 0.5)) * self.viewport_size.y as f32;
+        glam::Vec2::new(screen_x, screen_y)
+    }
+
+    /// 将世界空间半径转换为屏幕像素半径
+    /// 假设正交投影，并且 x/y 轴缩放一致（由相机宽高比处理）
+    pub fn world_radius_to_screen_pixels(&self, world_radius: f32) -> f32 {
+        // 世界空间中，可视区域的高度是 2.0 / camera.zoom
+        world_radius * (self.viewport_size.x as f32 * self.zoom / 2.0)
+    }
+
     /// 开始平移操作
     pub fn start_panning(&mut self, screen_pos: Vec2) {
         self.is_panning = true;

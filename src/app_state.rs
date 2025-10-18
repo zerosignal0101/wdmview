@@ -30,7 +30,7 @@ pub struct State {
     pub glyphon_swash_cache: glyphon::SwashCache,
     pub glyphon_atlas: glyphon::TextAtlas,
     pub glyphon_renderer: glyphon::TextRenderer,
-    pub glyphon_buffer: glyphon::Buffer,
+    pub glyphon_buffers: Vec<glyphon::Buffer>,
 
     pub camera: Camera,
     pub camera_buffer: wgpu::Buffer,
@@ -147,24 +147,18 @@ impl State {
         let mut glyphon_atlas = glyphon::TextAtlas::new(&device, &queue, &glyphon_cache, texture_format);
         let glyphon_renderer = glyphon::TextRenderer::new(&mut glyphon_atlas, &device, wgpu::MultisampleState::default(), None);
 
-        // Create a text buffer
-        let mut glyphon_buffer = glyphon::Buffer::new(
-            &mut glyphon_font_system,
-            glyphon::Metrics::new(30.0, 42.0), // Font size and line height
-        );
-
-        glyphon_buffer.set_size(
-            &mut glyphon_font_system,
-            Some(size.width as f32),
-            Some(size.height as f32),
-        );
-        glyphon_buffer.set_text(
-            &mut glyphon_font_system, 
-            "Hello world! 👋\nThis is rendered with 🦅 glyphon 🦁\nThe text below should be partially clipped.\na b c d e f g h i j k l m n o p q r s t u v w x y z", 
-            &glyphon::Attrs::new().family(glyphon::Family::SansSerif), 
-            glyphon::Shaping::Advanced
-        );
-        glyphon_buffer.shape_until_scroll(&mut glyphon_font_system, false);
+        // Create text buffers
+        let buffer_num = 4000 as usize;
+        let mut glyphon_buffers = Vec::with_capacity(buffer_num);
+        let attrs = glyphon::Attrs::new().family(glyphon::Family::SansSerif).weight(glyphon::Weight::NORMAL);
+        let shaping = glyphon::Shaping::Advanced;
+        for i in 0..buffer_num { // 注意这里没有 &，size 的类型是 f32
+            let mut text_buffer = glyphon::Buffer::new(&mut glyphon_font_system, glyphon::Metrics::relative(10.0, 16.0));
+            text_buffer.set_size(&mut glyphon_font_system, Some(100.0), None);
+            text_buffer.set_text(&mut glyphon_font_system, &format!("{i}"), &attrs, shaping);
+            text_buffer.shape_until_scroll(&mut glyphon_font_system, false);
+            glyphon_buffers.push(text_buffer);
+        }
         
         #[allow(unused_mut)]
         let mut camera = Camera::new(size.width, size.height);
@@ -380,7 +374,7 @@ impl State {
         Ok( Self {
             surface, device, queue, config, is_surface_configured: false,
             glyphon_font_system, glyphon_swash_cache, glyphon_viewport,
-            glyphon_atlas, glyphon_renderer, glyphon_buffer,
+            glyphon_atlas, glyphon_renderer, glyphon_buffers,
             camera, camera_buffer, camera_bind_group, camera_uniform, camera_needs_update: true,
             line_render_pipeline, circle_render_pipeline,
             circle_instances, circle_instance_buffer, quad_vertex_buffer, quad_index_buffer,
@@ -398,12 +392,14 @@ impl State {
             self.surface.configure(&self.device, &self.config);
 
             // Update glyphon buffer size
-            self.glyphon_buffer.set_size(
-                &mut self.glyphon_font_system,
-                Some(width as f32),
-                Some(height as f32),
-            );
-            self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+            for glyphon_buffer in self.glyphon_buffers.iter_mut() {
+                glyphon_buffer.set_size(
+                    &mut self.glyphon_font_system,
+                    Some(width as f32),
+                    Some(height as f32),
+                );
+                glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+            }
 
             self.camera.update_aspect_ratio(width, height);
             self.camera_needs_update = true;
@@ -431,6 +427,14 @@ impl State {
             return Ok(());
         }
 
+        // Update glyphon viewport
+        let width = self.config.width;
+        let height = self.config.height;
+        self.glyphon_viewport.update(&self.queue, glyphon::Resolution { width, height });
+
+        // --- Prepare Glyphon Text Areas ---
+        let mut text_areas = Vec::new();
+
         // --- FPS Calculation ---
         self.frame_count_in_second += 1;
         let now = Instant::now();
@@ -443,19 +447,46 @@ impl State {
         }
         // --- End FPS Calculation ---
 
-        // Update glyphon viewport
-        let width = self.config.width;
-        let height = self.config.height;
-        self.glyphon_viewport.update(&self.queue, glyphon::Resolution { width, height });
+        // Node Labels (e.g., radius)
+        for (i, (instance, glyphon_buffer)) in self.circle_instances.iter().zip(self.glyphon_buffers.iter_mut()).enumerate() {
+            let screen_pos = self.camera.world_to_screen(instance.position.into());
+            let screen_radius = self.camera.world_radius_to_screen_pixels(instance.radius_scale);
 
-        // Update glyphon text buffer
-        self.glyphon_buffer.set_text(
-            &mut self.glyphon_font_system,
-            &format!("FPS: {}", self.current_fps),
-            &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Advanced,
-        );
-        self.glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+            // Position the text slightly above the node, or inside.
+            // Adjust for font size (e.g., 12.0) and padding
+            let font_size = 32.0; // Example font size for labels
+            let line_height = 14.0; // Example line height
+            let text_top = screen_pos.y - (line_height / 2.0);
+            let text_left = screen_pos.x - (font_size * 2.0 / 2.0); // Center text (approx)
+
+            let label_text = format!("ID: {}", i); // Placeholder, ideally use actual node ID
+            // For a more robust solution, State should hold node unique IDs for mapping.
+            // For example, if you stored `nodes: Vec<NodeData>` in AppState, you'd access `nodes[i].id`.
+
+            glyphon_buffer.set_metrics(&mut self.glyphon_font_system, glyphon::Metrics::new(30.0, 30.0));
+            glyphon_buffer.set_size(
+                &mut self.glyphon_font_system,
+                Some(self.config.width as f32), // Max width for line wrapping
+                Some(self.config.height as f32),
+            );
+            glyphon_buffer.set_text(
+                &mut self.glyphon_font_system,
+                &label_text,
+                &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+                glyphon::Shaping::Advanced,
+            );
+            glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+
+            text_areas.push(glyphon::TextArea {
+                buffer: glyphon_buffer,
+                left: text_left,
+                top: text_top,
+                scale: 1.0,
+                bounds: glyphon::TextBounds::default(),
+                default_color: glyphon::Color::rgb(230, 230, 230), // Light gray for labels
+                custom_glyphs: &[]
+            });
+        }
 
         // Prepare glyphon text for rendering (uploads glyph textures)
         self.glyphon_renderer.prepare(
@@ -464,17 +495,9 @@ impl State {
             &mut self.glyphon_font_system,
             &mut self.glyphon_atlas,
             &self.glyphon_viewport,
-            [glyphon::TextArea {
-                buffer: &self.glyphon_buffer,
-                left: 0.0,
-                top: 5.0,
-                scale: 1.0,
-                bounds: glyphon::TextBounds::default(),
-                default_color: glyphon::Color::rgb(255, 255, 255),
-                custom_glyphs: &[]
-            }],
+            text_areas, // Pass the vector of TextAreas
             &mut self.glyphon_swash_cache,
-        ).unwrap(); // Handle error gracefully in real app
+        ).unwrap();
 
         let output = self.surface.get_current_texture()?;
         let view = output
