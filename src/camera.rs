@@ -89,7 +89,7 @@ impl Camera {
     /// 假设正交投影，并且 x/y 轴缩放一致（由相机宽高比处理）
     pub fn world_radius_to_screen_pixels(&self, world_radius: f32) -> f32 {
         // 世界空间中，可视区域的高度是 2.0 / camera.zoom
-        world_radius * (self.viewport_size.x as f32 * self.zoom / 2.0)
+        world_radius * (self.viewport_size.y as f32 * self.zoom / 2.0)
     }
 
     /// 开始平移操作
@@ -166,5 +166,19 @@ impl Camera {
 
         // 组合视图投影矩阵
         proj_matrix * view_matrix
+    }
+
+    pub fn get_world_clip_bounds(&self) -> (Vec2, Vec2) {
+        let half_world_width = self.aspect_ratio / self.zoom;
+        let half_world_height = 1.0 / self.zoom;
+
+        let center = self.position;
+
+        let min_x = center.x - half_world_width;
+        let max_x = center.x + half_world_width;
+        let min_y = center.y - half_world_height;
+        let max_y = center.y + half_world_height;
+
+        (Vec2::new(min_x, min_y), Vec2::new(max_x, max_y))
     }
 }

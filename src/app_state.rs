@@ -150,13 +150,8 @@ impl State {
         // Create text buffers
         let buffer_num = 4000 as usize;
         let mut glyphon_buffers = Vec::with_capacity(buffer_num);
-        let attrs = glyphon::Attrs::new().family(glyphon::Family::SansSerif).weight(glyphon::Weight::NORMAL);
-        let shaping = glyphon::Shaping::Advanced;
-        for i in 0..buffer_num { // 注意这里没有 &，size 的类型是 f32
-            let mut text_buffer = glyphon::Buffer::new(&mut glyphon_font_system, glyphon::Metrics::relative(10.0, 16.0));
-            text_buffer.set_size(&mut glyphon_font_system, Some(100.0), None);
-            text_buffer.set_text(&mut glyphon_font_system, &format!("{i}"), &attrs, shaping);
-            text_buffer.shape_until_scroll(&mut glyphon_font_system, false);
+        for _i in 0..buffer_num {
+            let text_buffer = glyphon::Buffer::new(&mut glyphon_font_system, glyphon::Metrics::relative(10.0, 16.0));
             glyphon_buffers.push(text_buffer);
         }
         
@@ -447,27 +442,48 @@ impl State {
         }
         // --- End FPS Calculation ---
 
+        // 获取相机在世界坐标中可见的区域，用于粗粒度裁剪
+        let (world_visible_min, world_visible_max) = self.camera.get_world_clip_bounds();
+
         // Node Labels (e.g., radius)
         for (i, (instance, glyphon_buffer)) in self.circle_instances.iter().zip(self.glyphon_buffers.iter_mut()).enumerate() {
+            // 1. 粗粒度世界坐标裁剪
+            // 简单判断节点中心是否在世界可见范围内
+            // 更精确的做法是判断节点的边界框与世界可见区域是否相交
+            if instance.position[0] < world_visible_min.x - instance.radius_scale * 2.0 || // 加上半径的裕量
+               instance.position[0] > world_visible_max.x + instance.radius_scale * 2.0 ||
+               instance.position[1] < world_visible_min.y - instance.radius_scale * 2.0 ||
+               instance.position[1] > world_visible_max.y + instance.radius_scale * 2.0 {
+                continue; // 节点超出世界可见范围，不渲染文本
+            }
+
             let screen_pos = self.camera.world_to_screen(instance.position.into());
             let screen_radius = self.camera.world_radius_to_screen_pixels(instance.radius_scale);
 
-            // Position the text slightly above the node, or inside.
-            // Adjust for font size (e.g., 12.0) and padding
-            let font_size = 32.0; // Example font size for labels
-            let line_height = 14.0; // Example line height
-            let text_top = screen_pos.y - (line_height / 2.0);
-            let text_left = screen_pos.x - (font_size * 2.0 / 2.0); // Center text (approx)
+            // 3. 级别细节 (LOD) 裁剪：如果节点太小，不显示标签
+            const MIN_DISPLAY_SCREEN_RADIUS: f32 = 60.0;
+            if screen_radius < MIN_DISPLAY_SCREEN_RADIUS {
+                continue;
+            }
 
-            let label_text = format!("ID: {}", i); // Placeholder, ideally use actual node ID
-            // For a more robust solution, State should hold node unique IDs for mapping.
-            // For example, if you stored `nodes: Vec<NodeData>` in AppState, you'd access `nodes[i].id`.
+            // --- 动态字体大小和定位 ---
+            let target_base_font_size_world = 3.0; // 世界坐标系下，文本的“理想”高度单位
+            let actual_font_size_screen = target_base_font_size_world * self.camera.zoom * (self.config.height as f32 / 2.0);
+            let clamped_font_size = actual_font_size_screen.clamp(10.0, 40.0); // 限制字体大小在合理范围
 
-            glyphon_buffer.set_metrics(&mut self.glyphon_font_system, glyphon::Metrics::new(30.0, 30.0));
+            let label_text = format!("ID: {} \n Radius: {:.1}", i, screen_radius); // 文本内容
+
+            // 只有当文本内容、字体大小或布局参数变化时才更新 TextBuffer
+            // 否则，Glyphon会使用其内部缓存
+            // 此处无法直接检测文本内容变化，所以如果每次都格式化字符串，则假定每次都可能变
+            // 真正的 dirty flag 应该包含文本内容的 hash 或引用
+            let metrics = glyphon::Metrics::new(clamped_font_size, clamped_font_size * 1.2); // 行高稍大一点
+            
+            glyphon_buffer.set_metrics(&mut self.glyphon_font_system, metrics);
             glyphon_buffer.set_size(
                 &mut self.glyphon_font_system,
-                Some(self.config.width as f32), // Max width for line wrapping
-                Some(self.config.height as f32),
+                Some(screen_radius), // 给一个足够宽的矩形来防止不必要的换行，或者计算实际可用宽度
+                None, // 不需要固定高度，让 Glyphon 自动计算
             );
             glyphon_buffer.set_text(
                 &mut self.glyphon_font_system,
@@ -477,13 +493,26 @@ impl State {
             );
             glyphon_buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
 
+            // 获取文本的实际宽度以便准确居中
+            let mut text_width = 0.0;
+            let mut text_height = 0.0;
+            if let Some(run) = glyphon_buffer.layout_runs().next() {
+                text_width = run.line_w;
+                text_height = run.line_height * glyphon_buffer.layout_runs().count() as f32;
+            }
+
+            // 根据屏幕半径和实际文本大小调整位置
+            let text_left = screen_pos.x - text_width / 2.0; // 文本中心与节点中心对齐
+            let text_top = screen_pos.y - text_height; // 文本放在节点上方，留 5 像素间距
+
+            // 将文本区域添加到待渲染列表
             text_areas.push(glyphon::TextArea {
                 buffer: glyphon_buffer,
                 left: text_left,
                 top: text_top,
-                scale: 1.0,
-                bounds: glyphon::TextBounds::default(),
-                default_color: glyphon::Color::rgb(230, 230, 230), // Light gray for labels
+                scale: 1.0, // scale 1.0 是指 buffer 内部的字体大小已经是最终屏幕尺寸
+                bounds: glyphon::TextBounds::default(), // 可以在这里设置裁剪矩形
+                default_color: glyphon::Color::rgb(230, 230, 230),
                 custom_glyphs: &[]
             });
         }
