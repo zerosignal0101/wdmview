@@ -144,7 +144,12 @@ impl State {
         let glyphon_swash_cache = glyphon::SwashCache::new();
         let glyphon_cache = glyphon::Cache::new(&device);
         let glyphon_viewport = glyphon::Viewport::new(&device, &glyphon_cache);
-        let mut glyphon_atlas = glyphon::TextAtlas::new(&device, &queue, &glyphon_cache, texture_format);
+        let color_mode = if needs_shader_srgb_output_conversion {
+            glyphon::ColorMode::Web
+        } else {
+            glyphon::ColorMode::Accurate
+        };
+        let mut glyphon_atlas = glyphon::TextAtlas::with_color_mode(&device, &queue, &glyphon_cache, texture_format, color_mode);
         let glyphon_renderer = glyphon::TextRenderer::new(&mut glyphon_atlas, &device, wgpu::MultisampleState::default(), None);
 
         // Create text buffers

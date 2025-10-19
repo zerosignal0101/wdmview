@@ -42,9 +42,9 @@ fn vs_main(
     var out: CircleFragmentInput;
 
     // 将基础四边形的局部坐标按实例半径缩放
-    // quad_position 从 -0.5 到 0.5，乘以 radius_scale 后，表示四边形的实际半宽/高
-    // 例如，如果 radius_scale 是 25.0，则四边形从 -12.5 到 12.5 (总宽 25.0)
-    let scaled_quad_local_offset = quad.quad_position * instance.instance_radius_scale;
+    // quad_position 从 -0.5 到 0.5，乘以 radius_scale * 2.0 后，表示四边形的实际半宽/高
+    // 例如，如果 radius_scale 是 25.0，则四边形从 -25 到 25 (总宽 50.0)
+    let scaled_quad_local_offset = quad.quad_position * instance.instance_radius_scale * 2.0;
 
     // 将缩放后的局部偏移量加到圆心世界坐标，得到最终的世界位置
     let world_position = instance.instance_world_position + scaled_quad_local_offset;

@@ -197,7 +197,9 @@ impl ApplicationHandler<UserCommand> for App {
                 match (button, mouse_button_state.is_pressed()) {
                     (MouseButton::Left, true) => {
                         state.is_mouse_left_pressed = true;
-                        log::info!("Mouse pos: {}, {}", state.mouse_current_pos_screen[0], state.mouse_current_pos_screen[1]);
+                        log::info!("Mouse screen pos: {}, {}", state.mouse_current_pos_screen[0], state.mouse_current_pos_screen[1]);
+                        let mouse_world_pos = state.camera.screen_to_world(state.mouse_current_pos_screen);
+                        log::info!("Mouse world pos: {}, {}", mouse_world_pos[0], mouse_world_pos[1]);
                         state.camera.start_panning(state.mouse_current_pos_screen);
                         state.camera_needs_update = true;
                         needs_redraw = true;
