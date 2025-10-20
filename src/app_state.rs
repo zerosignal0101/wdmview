@@ -5,12 +5,12 @@ use winit::{
 };
 use instant::Instant;
 use glam::Vec2;
+use bevy_color::{ColorToComponents, LinearRgba, Oklcha, Srgba};
 use wgpu::util::DeviceExt;
 
 
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
 use crate::camera::{Camera, CameraUniform};
-use crate::color::Color;
 
 
 const BASE_NODE_RADIUS: f32 = 25.0;
@@ -321,22 +321,22 @@ impl State {
             CircleInstance {
                 position: [-200.0, 0.0].into(),
                 radius_scale: BASE_NODE_RADIUS,
-                color: Color::from((255, 0, 0)).into_linear_rgba(),
+                color: LinearRgba::from(Srgba::rgb_u8(255, 0, 0)).to_f32_array(),
             },
             CircleInstance {
                 position: [0.0, 0.0].into(),
                 radius_scale: BASE_NODE_RADIUS,
-                color: Color::from((0, 255, 0)).into_linear_rgba(),
+                color: LinearRgba::from(Srgba::rgb_u8(0, 255, 0)).to_f32_array(),
             },
             CircleInstance {
                 position: [200.0, 0.0].into(),
                 radius_scale: BASE_NODE_RADIUS,
-                color: Color::from((0, 0, 255)).into_linear_rgba(),
+                color: LinearRgba::from(Srgba::rgb_u8(0, 0, 255)).to_f32_array(),
             },
             CircleInstance {
                 position: [0.0, 150.0].into(),
                 radius_scale: BASE_NODE_RADIUS * 1.5,
-                color: Color::from((255, 200, 0)).into_linear_rgba(),
+                color: LinearRgba::from(Srgba::rgb_u8(255, 200, 0)).to_f32_array(),
             },
         ];
 
@@ -435,15 +435,7 @@ impl State {
 
                 // 根据载波编号（这里简化为波段索引 i）生成颜色
                 // 你可以根据实际需求设计更复杂的颜色生成逻辑
-                let band_color_f32 = match i {
-                    0 => Color::from((255, 100, 100)).into_linear_rgba(), // 红色调
-                    1 => Color::from((100, 255, 100)).into_linear_rgba(), // 绿色调
-                    2 => Color::from((100, 100, 255)).into_linear_rgba(), // 蓝色调
-                    3 => Color::from((255, 255, 100)).into_linear_rgba(), // 黄色调
-                    4 => Color::from((100, 255, 255)).into_linear_rgba(), // 青色调
-                    5 => Color::from((255, 100, 255)).into_linear_rgba(), // 洋红色调
-                    _ => Color::from((200, 200, 200)).into_linear_rgba(), // 默认灰色
-                };
+                let band_color_f32 = Oklcha::lch(0.6, 0.092, 10.0 * (i as f32)).to_f32_array();
 
                 all_line_vertices.push(LineVertex { position: band_start_pos.into(), color: band_color_f32 });
                 all_line_vertices.push(LineVertex { position: band_end_pos.into(), color: band_color_f32 });
@@ -619,7 +611,7 @@ impl State {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(Color::from((18, 18, 18)).into_linear_wgpu_color()),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

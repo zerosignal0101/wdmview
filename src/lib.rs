@@ -21,7 +21,6 @@ use js_sys::Promise;
 
 mod models;
 mod camera;
-mod color;
 mod scene;
 mod ui_events;
 mod app_state;

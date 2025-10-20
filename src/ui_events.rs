@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use bevy_color::{Color, ColorToComponents, LinearRgba, Oklcha, Srgba};
 use wgpu::util::DeviceExt;
 
 use crate::scene::network::FullTopologyData;
@@ -7,7 +8,6 @@ use crate::scene::link::LinkData;
 use crate::app_state::State;
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
 use crate::camera::{Camera, CameraUniform};
-use crate::color::Color;
 
 
 #[allow(unused)]
@@ -39,7 +39,7 @@ impl State {
                     .map(|node| CircleInstance {
                         position: node.position.into(),
                         radius_scale: node.radius_scale,
-                        color: Color::from((node.color[0], node.color[1], node.color[2])).into_linear_rgba(),
+                        color: LinearRgba::from(Srgba::rgb_u8(node.color[0], node.color[1], node.color[2])).to_f32_array(),
                     })
                     .collect();
 
@@ -49,14 +49,14 @@ impl State {
                         node_id_to_idx.get(&link.source_id),
                         node_id_to_idx.get(&link.target_id),
                     ) {
-                        let line_color = Color::from((link.color[0], link.color[1], link.color[2]));
+                        let line_color = LinearRgba::from(Srgba::rgb_u8(link.color[0], link.color[1], link.color[2]));
                         self.line_vertices.push(LineVertex {
                             position: self.circle_instances[source_idx].position,
-                            color: line_color.into_linear_rgba(),
+                            color: line_color.to_f32_array(),
                         });
                         self.line_vertices.push(LineVertex {
                             position: self.circle_instances[target_idx].position,
-                            color: line_color.into_linear_rgba(),
+                            color: line_color.to_f32_array(),
                         });
                     } else {
                         log::warn!("Link references non-existent node ID. Source: {}, Target: {}", link.source_id, link.target_id);
