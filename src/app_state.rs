@@ -367,7 +367,7 @@ impl State {
         // --- 初始化通道连接数据 ---
         let connections = vec![
             ChannelLink { start_node_idx: 0, end_node_idx: 1, num_bands: 3, band_spacing: 12.0 },
-            ChannelLink { start_node_idx: 1, end_node_idx: 2, num_bands: 5, band_spacing: 8.0 },
+            ChannelLink { start_node_idx: 1, end_node_idx: 2, num_bands: 80, band_spacing: 1.0 },
             ChannelLink { start_node_idx: 0, end_node_idx: 3, num_bands: 2, band_spacing: 15.0 },
             ChannelLink { start_node_idx: 2, end_node_idx: 3, num_bands: 4, band_spacing: 10.0 },
         ];
@@ -435,7 +435,8 @@ impl State {
 
                 // 根据载波编号（这里简化为波段索引 i）生成颜色
                 // 你可以根据实际需求设计更复杂的颜色生成逻辑
-                let band_color_f32 = Oklcha::lch(0.6, 0.092, 10.0 * (i as f32)).to_f32_array();
+                let hue_color = (i as f32 + 1.0) / (link.num_bands as f32) * 180.0 + 30.0;
+                let band_color_f32 = LinearRgba::from(Oklcha::lch(0.7289, 0.11, hue_color)).to_f32_array();
 
                 all_line_vertices.push(LineVertex { position: band_start_pos.into(), color: band_color_f32 });
                 all_line_vertices.push(LineVertex { position: band_end_pos.into(), color: band_color_f32 });
