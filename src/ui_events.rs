@@ -1,23 +1,25 @@
 use std::collections::HashMap;
 use bevy_color::{Color, ColorToComponents, LinearRgba, Oklcha, Srgba};
+use glam::Vec2;
 use wgpu::util::DeviceExt;
 
 use crate::scene::network::FullTopologyData;
-use crate::scene::node::NodeData;
-use crate::scene::link::LinkData;
+use crate::scene::element::ElementData;
+use crate::scene::connection::LinkData;
+use crate::scene::service::ServiceData;
 use crate::app_state::State;
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
-use crate::camera::{Camera, CameraUniform};
 
 
 #[allow(unused)]
 #[derive(Debug)]
 pub enum UserCommand {
     SetFullTopology {
-        nodes: Vec<NodeData>,
-        links: Vec<LinkData>,
+        elements: Vec<ElementData>,
+        connections: Vec<LinkData>,
+        services: Vec<ServiceData>,
     },
-    AddNode(NodeData),
+    AddNode(ElementData),
     RemoveNode(u32),
     StateInitialized, // Notifies App that State setup is complete
 }
@@ -25,41 +27,53 @@ pub enum UserCommand {
 impl State {
   pub fn process_command(&mut self, command: UserCommand) {
         match command {
-            UserCommand::SetFullTopology { nodes, links } => {
-                log::info!("Setting full topology with {} nodes and {} links.", nodes.len(), links.len());
+            UserCommand::SetFullTopology { elements, connections, services } => {
+                log::info!("Setting full topology with {} nodes and {} links.", elements.len(), connections.len());
 
-                let node_id_to_idx: HashMap<u32, usize> = nodes
+                let node_id_to_idx: HashMap<String, usize> = elements
                     .iter()
                     .enumerate()
-                    .map(|(i, node)| (node.id, i))
+                    .map(|(i, element)| (element.element_id.clone(), i))
                     .collect();
 
-                self.circle_instances = nodes
+                self.circle_instances = elements
                     .into_iter()
-                    .map(|node| CircleInstance {
-                        position: node.position.into(),
-                        radius_scale: node.radius_scale,
-                        color: LinearRgba::from(Srgba::rgb_u8(node.color[0], node.color[1], node.color[2])).to_f32_array(),
+                    .map(|element| CircleInstance {
+                        position: [element.metadata.location.x, element.metadata.location.y],
+                        radius_scale: 25.0,
+                        color: LinearRgba::from(Srgba::rgb_u8(0x00, 0x5d, 0x5d)).to_f32_array(),
                     })
                     .collect();
 
                 self.line_vertices.clear();
-                for link in links {
+                for link in connections {
                     if let (Some(&source_idx), Some(&target_idx)) = (
-                        node_id_to_idx.get(&link.source_id),
-                        node_id_to_idx.get(&link.target_id),
+                        node_id_to_idx.get(&link.from_node),
+                        node_id_to_idx.get(&link.to_node),
                     ) {
-                        let line_color = LinearRgba::from(Srgba::rgb_u8(link.color[0], link.color[1], link.color[2]));
+                        let line_color = LinearRgba::from(Srgba::rgb_u8(230, 230, 230));
+                        let source_position = Vec2::from_array(self.circle_instances[source_idx].position);
+                        let destination_position = Vec2::from_array(self.circle_instances[target_idx].position);
+                        let dir_vec = destination_position - source_position;
+                        let length = dir_vec.length();
+
+                        // 避免除以零或非常短的线段
+                        if length < f32::EPSILON {
+                            continue;
+                        }
+
+                        let normalized_dir = dir_vec.normalize();
+
                         self.line_vertices.push(LineVertex {
-                            position: self.circle_instances[source_idx].position,
+                            position: source_position.into(),
                             color: line_color.to_f32_array(),
                         });
                         self.line_vertices.push(LineVertex {
-                            position: self.circle_instances[target_idx].position,
+                            position: destination_position.into(),
                             color: line_color.to_f32_array(),
                         });
                     } else {
-                        log::warn!("Link references non-existent node ID. Source: {}, Target: {}", link.source_id, link.target_id);
+                        log::warn!("Link references non-existent node ID. Source: {}, Target: {}", link.from_node, link.to_node);
                     }
                 }
 

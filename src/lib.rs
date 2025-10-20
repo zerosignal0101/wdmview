@@ -322,8 +322,9 @@ impl WasmApi {
             .map_err(|e| JsValue::from_str(&format!("JSON parsing error: {}", e)))?;
 
         let command = UserCommand::SetFullTopology {
-            nodes: parsed_topology.nodes,
-            links: parsed_topology.links,
+            elements: parsed_topology.elements,
+            connections: parsed_topology.connections,
+            services: parsed_topology.services,
         };
 
         log::info!("Received SetFullTopology command from JS.");
