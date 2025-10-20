@@ -17,14 +17,6 @@ const BASE_NODE_RADIUS: f32 = 25.0;
 const LINES_WGSL: &str = include_str!("./shaders/lines.wgsl");
 const CIRCLES_WGSL: &str = include_str!("./shaders/circles.wgsl");
 
-#[derive(Debug, Clone)]
-pub struct ChannelLink {
-    pub start_node_idx: usize, // 起始节点的索引 (对应 circle_instances 的索引)
-    pub end_node_idx: usize,   // 结束节点的索引
-    pub num_bands: u32,        // 波段数量
-    pub band_spacing: f32,     // 每个波段之间的世界单位距离
-}
-
 
 pub struct State {
     pub surface: wgpu::Surface<'static>,
@@ -55,7 +47,6 @@ pub struct State {
     pub quad_vertex_buffer: wgpu::Buffer,
     pub quad_index_buffer: wgpu::Buffer,
 
-    pub connections: Vec<ChannelLink>, // 存储通道链接数据
     pub line_vertices: Vec<LineVertex>,
     pub line_vertex_buffer: wgpu::Buffer,
 
@@ -364,22 +355,19 @@ impl State {
             }
         );
 
-        // --- 初始化通道连接数据 ---
-        let connections = vec![
-            ChannelLink { start_node_idx: 0, end_node_idx: 1, num_bands: 3, band_spacing: 12.0 },
-            ChannelLink { start_node_idx: 1, end_node_idx: 2, num_bands: 80, band_spacing: 1.0 },
-            ChannelLink { start_node_idx: 0, end_node_idx: 3, num_bands: 2, band_spacing: 15.0 },
-            ChannelLink { start_node_idx: 2, end_node_idx: 3, num_bands: 4, band_spacing: 10.0 },
+        let line_vertices = vec![
+            LineVertex { position: circle_instances[0].position.into(), color: LinearRgba::from(Srgba::rgb_u8(200, 200, 200)).to_f32_array() },
+            LineVertex { position: circle_instances[1].position.into(), color: LinearRgba::from(Srgba::rgb_u8(200, 200, 200)).to_f32_array() },
+            LineVertex { position: circle_instances[1].position.into(), color: LinearRgba::from(Srgba::rgb_u8(200, 200, 200)).to_f32_array() },
+            LineVertex { position: circle_instances[2].position.into(), color: LinearRgba::from(Srgba::rgb_u8(200, 200, 200)).to_f32_array() },
+            LineVertex { position: circle_instances[0].position.into(), color: LinearRgba::from(Srgba::rgb_u8(200, 200, 200)).to_f32_array() },
+            LineVertex { position: circle_instances[3].position.into(), color: LinearRgba::from(Srgba::rgb_u8(200, 200, 200)).to_f32_array() },
         ];
-
-        // --- 根据节点和连接生成所有波段的线段顶点 ---
-        let line_vertices = Self::generate_band_vertices(&circle_instances, &connections);
 
         let line_vertex_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Line Vertex Buffer"),
                 contents: bytemuck::cast_slice(&line_vertices),
-                // 使用 COPY_DST 允许后续帧更新线段数据
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }
         );
@@ -391,58 +379,10 @@ impl State {
             camera, camera_buffer, camera_bind_group, camera_uniform, camera_needs_update: true,
             line_render_pipeline, circle_render_pipeline,
             circle_instances, circle_instance_buffer, quad_vertex_buffer, quad_index_buffer,
-            connections, line_vertices, line_vertex_buffer,
+            line_vertices, line_vertex_buffer,
             mouse_current_pos_screen: Vec2::ZERO, is_mouse_left_pressed: false,
             last_frame_instant: Instant::now(), frame_count_in_second: 0, current_fps: 0,
         })
-    }
-
-    /// 根据当前节点和连接数据生成所有波段的线段顶点。
-    fn generate_band_vertices(
-        nodes: &[CircleInstance],
-        links: &[ChannelLink],
-    ) -> Vec<LineVertex> {
-        let mut all_line_vertices = Vec::new();
-
-        // 提取节点的世界坐标，方便查找
-        let node_positions: Vec<Vec2> = nodes.iter().map(|n| n.position.into()).collect();
-
-        for link in links {
-            let start_pos_center = node_positions[link.start_node_idx];
-            let end_pos_center = node_positions[link.end_node_idx];
-
-            let dir_vec = end_pos_center - start_pos_center;
-            let length = dir_vec.length();
-
-            // 避免除以零或非常短的线段
-            if length < f32::EPSILON {
-                continue;
-            }
-
-            let normalized_dir = dir_vec.normalize();
-            // 计算垂直于连接方向的向量。对于 2D 向量 (x, y)，(-y, x) 是一个垂直向量。
-            let perpendicular_dir = Vec2::new(-normalized_dir.y, normalized_dir.x);
-
-            for i in 0..link.num_bands {
-                // 计算每个波段的偏移量。
-                // 这里的逻辑使得 num_bands 为奇数时，中间波段（i = (num_bands - 1) / 2）恰好在节点中心连线上。
-                // 如果 num_bands 为偶数，则没有波段在中心线上，它们会对称分布。
-                let offset_factor = (i as f32) - ((link.num_bands - 1) as f32 / 2.0);
-                let offset = perpendicular_dir * offset_factor * link.band_spacing;
-
-                let band_start_pos = start_pos_center + offset;
-                let band_end_pos = end_pos_center + offset;
-
-                // 根据载波编号（这里简化为波段索引 i）生成颜色
-                // 你可以根据实际需求设计更复杂的颜色生成逻辑
-                let hue_color = (i as f32 + 1.0) / (link.num_bands as f32) * 180.0 + 30.0;
-                let band_color_f32 = LinearRgba::from(Oklcha::lch(0.7289, 0.11, hue_color)).to_f32_array();
-
-                all_line_vertices.push(LineVertex { position: band_start_pos.into(), color: band_color_f32 });
-                all_line_vertices.push(LineVertex { position: band_end_pos.into(), color: band_color_f32 });
-            }
-        }
-        all_line_vertices
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
