@@ -624,10 +624,6 @@ impl State {
 
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            render_pass.set_pipeline(&self.line_render_pipeline);
-            render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
-            render_pass.draw(0..self.line_vertices.len() as u32, 0..1);
-
             render_pass.set_pipeline(&self.circle_render_pipeline);
             render_pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.circle_instance_buffer.slice(..));
@@ -637,6 +633,10 @@ impl State {
                 0,
                 0..self.circle_instances.len() as u32,
             );
+
+            render_pass.set_pipeline(&self.line_render_pipeline);
+            render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
+            render_pass.draw(0..self.line_vertices.len() as u32, 0..1);
 
             // --- Draw Glyphon Text ---
             self.glyphon_renderer.render(&self.glyphon_atlas, &self.glyphon_viewport, &mut render_pass).unwrap();
