@@ -334,6 +334,17 @@ impl WasmApi {
         }
         Ok(())
     }
+
+    /// 新增 WASM 接口：设置当前时间轴选中的时刻
+    #[wasm_bindgen(js_name = setTimeSelection)]
+    pub fn set_time_selection(&self, time: f32) -> Result<(), JsValue> {
+        let command = UserCommand::SetTimeSelection(time);
+        log::debug!("Received SetTimeSelection command from JS: {}", time);
+        if self.proxy.send_event(command).is_err() {
+            return Err(JsValue::from_str("Failed to send SetTimeSelection command to event loop."));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

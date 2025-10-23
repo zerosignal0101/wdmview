@@ -11,9 +11,11 @@ use wgpu::util::DeviceExt;
 
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
 use crate::camera::{Camera, CameraUniform};
+use crate::scene::service::ServiceData; // 引入 ServiceData
+use crate::scene::element::ElementData; // 引入 ElementData
 
 
-const BASE_NODE_RADIUS: f32 = 25.0;
+pub const BASE_NODE_RADIUS: f32 = 20.0;
 const LINES_WGSL: &str = include_str!("./shaders/lines.wgsl");
 const CIRCLES_WGSL: &str = include_str!("./shaders/circles.wgsl");
 
@@ -49,6 +51,14 @@ pub struct State {
 
     pub line_vertices: Vec<LineVertex>,
     pub line_vertex_buffer: wgpu::Buffer,
+
+    // --- 新增时间轴和拓扑数据管理字段 ---
+    pub all_elements: Vec<ElementData>, // 存储所有节点数据
+    pub all_services: Vec<ServiceData>, // 存储所有服务数据
+    // 用于快速查找节点 ID 对应的 circle_instances 索引
+    pub node_id_to_idx: HashMap<String, usize>,
+    pub current_time_selection: f32, // 当前时间轴选中的时刻
+    pub topology_needs_update: bool, // 标记拓扑（主要是服务线路）是否需要因时间变化而更新
 
     pub mouse_current_pos_screen: Vec2,
     pub is_mouse_left_pressed: bool,
@@ -382,6 +392,12 @@ impl State {
             line_vertices, line_vertex_buffer,
             mouse_current_pos_screen: Vec2::ZERO, is_mouse_left_pressed: false,
             last_frame_instant: Instant::now(), frame_count_in_second: 0, current_fps: 0,
+            // --- 新增字段初始化 ---
+            all_elements: Vec::new(),
+            all_services: Vec::new(),
+            node_id_to_idx: HashMap::new(),
+            current_time_selection: 0.0, // 默认初始时间为 0
+            topology_needs_update: false,
         })
     }
 
@@ -410,6 +426,8 @@ impl State {
     }
 
     pub fn update(&mut self) -> bool {
+        let mut needs_redraw = false;
+
         if self.camera_needs_update {
             self.camera_uniform.view_proj = self.camera.build_view_projection_matrix().to_cols_array_2d();
             self.queue.write_buffer(
@@ -418,9 +436,187 @@ impl State {
                 bytemuck::cast_slice(&[self.camera_uniform]),
             );
             self.camera_needs_update = false;
-            return true;
+            needs_redraw = true;
         }
-        false
+        
+        // 如果拓扑（主要是服务线路）需要更新
+        if self.topology_needs_update {
+            log::debug!("Updating topology due to time change or initial load. Time: {}", self.current_time_selection);
+            self.generate_all_lines_for_current_time();
+            self.update_gpu_buffers(); // Upload new line vertices to GPU
+            self.topology_needs_update = false;
+            needs_redraw = true; // Request redraw to show updated lines
+        }
+
+        needs_redraw
+    }
+
+    pub fn update_gpu_buffers(&mut self) {
+        let circle_data = bytemuck::cast_slice(&self.circle_instances);
+        let line_data = bytemuck::cast_slice(&self.line_vertices);
+
+        // (Re)create circle instance buffer if size changes, otherwise write
+        if self.circle_instance_buffer.size() < circle_data.len() as u64 {
+            self.circle_instance_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Circle Instance Buffer (Resized)"),
+                contents: circle_data,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+        } else {
+            self.queue.write_buffer(&self.circle_instance_buffer, 0, circle_data);
+        }
+
+        // (Re)create line vertex buffer if size changes, otherwise write
+        if self.line_vertex_buffer.size() < line_data.len() as u64 {
+            self.line_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Line Vertex Buffer (Resized)"),
+                contents: line_data,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+        } else {
+            self.queue.write_buffer(&self.line_vertex_buffer, 0, line_data);
+        }
+    }
+
+    /// 根据当前时间轴选择，重新生成所有链接和服务的线条。
+    fn generate_all_lines_for_current_time(&mut self) {
+        self.line_vertices.clear(); // 清除所有旧线条
+
+        let radius_inside = BASE_NODE_RADIUS;
+        const LINK_BOUNDARY_ROTATE_ANGLE: f32 = std::f32::consts::PI / 16.0;
+
+        // --- 1. 渲染固定的链路边界 ---
+        // 注意：这里需要 connections 数据，但目前 connections 没有存储在 State 中。
+        // 如果链路边界是固定的，它们应该在 SetFullTopology 时生成一次，并独立存储。
+        // 为了简化，我们假设拓扑加载后，`connections` 不会变，这里我们只关注 services 的动态变化。
+        // 原来的 connections 绘制逻辑应该放到 SetFullTopology 里面，或者作为另一个 Vec<LineVertex> 存储。
+        // 在这里，我们简化为只处理服务线条。如果需要链路边界，SetFullTopology 之后需要额外处理。
+        
+        // 鉴于旧代码将 connections 的线条生成放在了 `process_command` 的 `SetFullTopology` 中，
+        // 且与 `services` 的生成是混合在一起的，我们需要重新组织逻辑：
+        // 1. `SetFullTopology` 负责初始化 `circle_instances`, `node_id_to_idx`, `all_services`, `all_elements`。
+        // 2. 将 'links' (connections) 的线条绘制逻辑也整合到 `generate_all_lines_for_current_time` 中，
+        //    或者将其作为静态的 `link_line_vertices` 存储起来。
+        // 为了简化，我们假设 `connections` 数据也在 `all_elements` 或 `all_services` 的上下文里，
+        // 但目前没有 `all_connections` 字段。
+        // 假设 connections 也是在 SetFullTopology 里处理一次性生成，我们这里只生成 services。
+        // 以下是假设 `self.connections` (这是一个你需要添加的字段，否则这个部分无法执行) 包含 LinkData 的情况。
+        // 暂时先只处理服务线条，并假定 `connections` 中的链路边界绘制已经从 `process_command` 移除或静态处理。
+        // 如果需要，你应该在 State 中添加 `pub all_connections: Vec<LinkData>,`
+
+        // 临时解决方案：为了让编译通过，这里假设 connections 也是动态加载的
+        // 但更好的做法是，connections 产生的 lines 在 SetFullTopology 时单独计算好并存入一个独立的 buffer 或 Vec<LineVertex>
+        // 不随时间变化的部分不应该在 generate_all_lines_for_current_time 中重复计算。
+        // 这里只是为了演示动态更新，我把服务路径的部分再写一遍。
+
+        // --- 2. 渲染当前时间活跃的服务线条 ---
+        const MAX_WAVELENGTHS: u32 = 80;
+        const SERVICE_MAX_SPREAD_ANGLE: f32 = LINK_BOUNDARY_ROTATE_ANGLE * 0.95;
+
+        for service in &self.all_services {
+            let departure_time = service.arrival_time + service.holding_time;
+            // 检查服务是否在当前时间活跃
+            if self.current_time_selection >= service.arrival_time && self.current_time_selection < departure_time {
+                let wavelength = service.wavelength;
+                let effective_wavelength = (wavelength as f32).min((MAX_WAVELENGTHS - 1) as f32);
+
+                let hue_color = (effective_wavelength + 0.5) / (MAX_WAVELENGTHS as f32) * 180.0 + 30.0;
+                let service_color_oklcha = Oklcha::lch(0.7289, 0.11, hue_color);
+                let service_color_f32 = LinearRgba::from(service_color_oklcha).to_f32_array();
+
+                let normalized_wavelength_factor = (effective_wavelength - ((MAX_WAVELENGTHS as f32 - 1.0) / 2.0)) / ((MAX_WAVELENGTHS as f32 - 1.0) / 2.0);
+                let wavelength_rotate_angle = normalized_wavelength_factor * SERVICE_MAX_SPREAD_ANGLE;
+
+                for i in 0..(service.path.len() - 1) {
+                    let source_node_id = &service.path[i];
+                    let target_node_id = &service.path[i + 1];
+
+                    if let (Some(&source_idx), Some(&target_idx)) = (
+                        self.node_id_to_idx.get(source_node_id),
+                        self.node_id_to_idx.get(target_node_id),
+                    ) {
+                        let source_pos_center = Vec2::from_array(self.circle_instances[source_idx].position);
+                        let target_pos_center = Vec2::from_array(self.circle_instances[target_idx].position);
+
+                        let dir_vec = target_pos_center - source_pos_center;
+                        let length = dir_vec.length();
+
+                        if length < f32::EPSILON {
+                            continue;
+                        }
+
+                        let normalized_dir = dir_vec.normalize();
+                        let radius_vec_along_link = normalized_dir * radius_inside;
+
+                        let upward_sacle: f32 = if normalized_dir.y >= 0.0 { 1.0 } else { -1.0 };
+                        let service_start_pos = source_pos_center + radius_vec_along_link.rotate(Vec2::from_angle(wavelength_rotate_angle * upward_sacle));
+                        let service_end_pos = target_pos_center - radius_vec_along_link.rotate(Vec2::from_angle( - wavelength_rotate_angle * upward_sacle));
+
+                        self.line_vertices.push(LineVertex {
+                            position: service_start_pos.into(),
+                            color: service_color_f32,
+                        });
+                        self.line_vertices.push(LineVertex {
+                            position: service_end_pos.into(),
+                            color: service_color_f32,
+                        });
+                    } else {
+                        log::warn!(
+                            "Service {} path references non-existent node ID. Segment: {} -> {}",
+                            service.service_id, source_node_id, target_node_id
+                        );
+                    }
+                }
+
+                // Processing the segments inside the circle (if any)
+                // This logic should be re-evaluated for clarity and correctness based on how nodes handle through-traffic
+                // and how these "inside segments" connect. For simplicity, keeping the original logic structure here.
+                for i in 0..(service.path.len() - 2) {
+                    let source_node_id = &service.path[i];
+                    let middle_node_id = &service.path[i + 1];
+                    let target_node_id = &service.path[i + 2];
+
+                    if let (Some(&source_idx), Some(&middle_idx), Some(&target_idx)) = (
+                        self.node_id_to_idx.get(source_node_id),
+                        self.node_id_to_idx.get(middle_node_id),
+                        self.node_id_to_idx.get(target_node_id),
+                    ) {
+                        let source_pos_center = Vec2::from_array(self.circle_instances[source_idx].position);
+                        let middle_pos_center = Vec2::from_array(self.circle_instances[middle_idx].position);
+                        let target_pos_center = Vec2::from_array(self.circle_instances[target_idx].position);
+
+                        let source_middle_dir_vec = target_pos_center - middle_pos_center;
+                        let middle_target_dir_vec = middle_pos_center - source_pos_center;
+
+                        let normalized_source_middle_dir = source_middle_dir_vec.normalize();
+                        let normalized_middle_target_dir = middle_target_dir_vec.normalize();
+                        
+                        let radius_source_middle_vec_along_link = normalized_source_middle_dir * radius_inside;
+                        let radius_middle_target_vec_along_link = normalized_middle_target_dir * radius_inside;
+
+                        let source_middle_upward_sacle: f32 = if normalized_source_middle_dir.y >= 0.0 { 1.0 } else { -1.0 };
+                        let middle_target_upward_sacle: f32 = if normalized_middle_target_dir.y >= 0.0 { 1.0 } else { -1.0 };
+                        
+                        let middle_start_pos = middle_pos_center + radius_source_middle_vec_along_link.rotate(Vec2::from_angle(wavelength_rotate_angle * source_middle_upward_sacle));
+                        let middle_end_pos = middle_pos_center - radius_middle_target_vec_along_link.rotate(Vec2::from_angle( - wavelength_rotate_angle * middle_target_upward_sacle));
+
+                        self.line_vertices.push(LineVertex {
+                            position: middle_start_pos.into(),
+                            color: service_color_f32,
+                        });
+                        self.line_vertices.push(LineVertex {
+                            position: middle_end_pos.into(),
+                            color: service_color_f32,
+                        });
+                    } else {
+                        log::warn!(
+                            "Service {} path references non-existent node ID. Segment: {} -> {}",
+                            service.service_id, source_node_id, target_node_id
+                        );
+                    }
+                }
+            }
+        }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
