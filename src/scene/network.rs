@@ -3,11 +3,11 @@ use serde::Deserialize;
 use crate::scene::service::ServiceData;
 
 use super::element::ElementData;
-use super::connection::LinkData;
+use super::connection::ConnectionData;
 
 #[derive(Deserialize, Debug)]
 pub struct FullTopologyData {
     pub elements: Vec<ElementData>,
-    pub connections: Vec<LinkData>,
+    pub connections: Vec<ConnectionData>,
     pub services: Vec<ServiceData>,
 }

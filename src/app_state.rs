@@ -11,6 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
 use crate::camera::{Camera, CameraUniform};
+use crate::scene::connection::ConnectionData;
 use crate::scene::service::ServiceData; // 引入 ServiceData
 use crate::scene::element::ElementData; // 引入 ElementData
 
@@ -54,6 +55,7 @@ pub struct State {
 
     // --- 新增时间轴和拓扑数据管理字段 ---
     pub all_elements: Vec<ElementData>, // 存储所有节点数据
+    pub all_connections: Vec<ConnectionData>,
     pub all_services: Vec<ServiceData>, // 存储所有服务数据
     // 用于快速查找节点 ID 对应的 circle_instances 索引
     pub node_id_to_idx: HashMap<String, usize>,
@@ -394,6 +396,7 @@ impl State {
             last_frame_instant: Instant::now(), frame_count_in_second: 0, current_fps: 0,
             // --- 新增字段初始化 ---
             all_elements: Vec::new(),
+            all_connections: Vec::new(),
             all_services: Vec::new(),
             node_id_to_idx: HashMap::new(),
             current_time_selection: 0.0, // 默认初始时间为 0
@@ -486,28 +489,52 @@ impl State {
         const LINK_BOUNDARY_ROTATE_ANGLE: f32 = std::f32::consts::PI / 16.0;
 
         // --- 1. 渲染固定的链路边界 ---
-        // 注意：这里需要 connections 数据，但目前 connections 没有存储在 State 中。
-        // 如果链路边界是固定的，它们应该在 SetFullTopology 时生成一次，并独立存储。
-        // 为了简化，我们假设拓扑加载后，`connections` 不会变，这里我们只关注 services 的动态变化。
-        // 原来的 connections 绘制逻辑应该放到 SetFullTopology 里面，或者作为另一个 Vec<LineVertex> 存储。
-        // 在这里，我们简化为只处理服务线条。如果需要链路边界，SetFullTopology 之后需要额外处理。
-        
-        // 鉴于旧代码将 connections 的线条生成放在了 `process_command` 的 `SetFullTopology` 中，
-        // 且与 `services` 的生成是混合在一起的，我们需要重新组织逻辑：
-        // 1. `SetFullTopology` 负责初始化 `circle_instances`, `node_id_to_idx`, `all_services`, `all_elements`。
-        // 2. 将 'links' (connections) 的线条绘制逻辑也整合到 `generate_all_lines_for_current_time` 中，
-        //    或者将其作为静态的 `link_line_vertices` 存储起来。
-        // 为了简化，我们假设 `connections` 数据也在 `all_elements` 或 `all_services` 的上下文里，
-        // 但目前没有 `all_connections` 字段。
-        // 假设 connections 也是在 SetFullTopology 里处理一次性生成，我们这里只生成 services。
-        // 以下是假设 `self.connections` (这是一个你需要添加的字段，否则这个部分无法执行) 包含 LinkData 的情况。
-        // 暂时先只处理服务线条，并假定 `connections` 中的链路边界绘制已经从 `process_command` 移除或静态处理。
-        // 如果需要，你应该在 State 中添加 `pub all_connections: Vec<LinkData>,`
+        for link in &self.all_connections {
+            if let (Some(&source_idx), Some(&target_idx)) = (
+                self.node_id_to_idx.get(&link.from_node),
+                self.node_id_to_idx.get(&link.to_node),
+            ) {
+                let link_boundary_color = LinearRgba::from(Srgba::rgb_u8(180, 180, 180));
+                let source_position_center = Vec2::from_array(self.circle_instances[source_idx].position);
+                let destination_position_center = Vec2::from_array(self.circle_instances[target_idx].position);
+                let dir_vec = destination_position_center - source_position_center;
+                let length = dir_vec.length();
 
-        // 临时解决方案：为了让编译通过，这里假设 connections 也是动态加载的
-        // 但更好的做法是，connections 产生的 lines 在 SetFullTopology 时单独计算好并存入一个独立的 buffer 或 Vec<LineVertex>
-        // 不随时间变化的部分不应该在 generate_all_lines_for_current_time 中重复计算。
-        // 这里只是为了演示动态更新，我把服务路径的部分再写一遍。
+                // Avoid division by zero or rendering extremely short segments
+                if length < f32::EPSILON {
+                    continue;
+                }
+
+                let normalized_dir = dir_vec.normalize();
+                let radius_dir_outward = normalized_dir * radius_inside; // Vector from source center to circumference, outward
+
+                let rotate_vector = Vec2::from_angle(LINK_BOUNDARY_ROTATE_ANGLE);
+                let reverse_rotate_vector = Vec2::from_angle(-LINK_BOUNDARY_ROTATE_ANGLE);
+
+                // Upper boundary line
+                self.line_vertices.push(LineVertex {
+                    position: (source_position_center + radius_dir_outward.rotate(rotate_vector)).into(),
+                    color: link_boundary_color.to_f32_array(),
+                });
+                self.line_vertices.push(LineVertex {
+                    // Target point: from target center, move inward along dir_vec, then rotate
+                    position: (destination_position_center - radius_dir_outward.rotate(reverse_rotate_vector)).into(),
+                    color: link_boundary_color.to_f32_array(),
+                });
+
+                // Lower boundary line
+                self.line_vertices.push(LineVertex {
+                    position: (source_position_center + radius_dir_outward.rotate(reverse_rotate_vector)).into(),
+                    color: link_boundary_color.to_f32_array(),
+                });
+                self.line_vertices.push(LineVertex {
+                    position: (destination_position_center - radius_dir_outward.rotate(rotate_vector)).into(),
+                    color: link_boundary_color.to_f32_array(),
+                });
+            } else {
+                log::warn!("Link references non-existent node ID. Source: {}, Target: {}", link.from_node, link.to_node);
+            }
+        }
 
         // --- 2. 渲染当前时间活跃的服务线条 ---
         const MAX_WAVELENGTHS: u32 = 80;
@@ -569,8 +596,6 @@ impl State {
                 }
 
                 // Processing the segments inside the circle (if any)
-                // This logic should be re-evaluated for clarity and correctness based on how nodes handle through-traffic
-                // and how these "inside segments" connect. For simplicity, keeping the original logic structure here.
                 for i in 0..(service.path.len() - 2) {
                     let source_node_id = &service.path[i];
                     let middle_node_id = &service.path[i + 1];

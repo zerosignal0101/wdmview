@@ -5,7 +5,7 @@ use wgpu::util::DeviceExt;
 
 use crate::scene::network::FullTopologyData;
 use crate::scene::element::ElementData;
-use crate::scene::connection::LinkData;
+use crate::scene::connection::ConnectionData;
 use crate::scene::service::ServiceData;
 use crate::app_state::{State, BASE_NODE_RADIUS};
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
@@ -16,11 +16,9 @@ use crate::models::{Vertex2D, CircleInstance, LineVertex};
 pub enum UserCommand {
     SetFullTopology {
         elements: Vec<ElementData>,
-        connections: Vec<LinkData>,
+        connections: Vec<ConnectionData>,
         services: Vec<ServiceData>,
     },
-    AddNode(ElementData),
-    RemoveNode(u32),
     StateInitialized, // Notifies App that State setup is complete
     SetTimeSelection(f32), // 新增：设置时间轴选中的时刻
 }
@@ -42,6 +40,8 @@ impl State {
 
                 // 存储所有节点数据
                 self.all_elements = elements;
+                // 存储所有连接数据
+                self.all_connections = connections;
                 // 存储所有服务数据
                 self.all_services = services;
                 
@@ -56,36 +56,11 @@ impl State {
                     })
                     .collect();
 
-                // 清除旧的线条数据，以便重新计算所有线条（包括静态链路和动态服务）
-                // 链路边界线也是静态的，如果 connections 是固定不变的，可以在这里绘制一次
-                // 并存储到单独的 `link_lines: Vec<LineVertex>` 中，后续时间改变时只更新服务线。
-                // 为了简化，这里暂时在 `generate_all_lines_for_current_time` 中统一处理 (但效率会低一点)
-                // 或者，我们可以确保 connections 的线条只在这里生成一次并写入 `line_vertices`，
-                // 然后 services 的线条逻辑可以追加（需要更精细的buffer管理或在State里区分）。
-                // 为了避免 `generate_all_lines_for_current_time` 依赖 connections，我们先假定 connections 产生的数据
-                // 也是通过服务路径隐含的，或者在 time_selection 之前已经存在。
-                // 更好的解决方案是：
-                // 1. `State` 中增加 `pub static_link_line_vertices: Vec<LineVertex>`
-                // 2. `SetFullTopology` 时，用 `connections` 填充 `static_link_line_vertices`
-                // 3. `generate_all_lines_for_current_time` 重新构建 `line_vertices` 时，
-                //    先 `self.line_vertices.extend_from_slice(&self.static_link_line_vertices);`
-                //    然后再添加活跃的服务线条。
-                // 这里暂时直接清空 `self.line_vertices` 并让 `generate_all_lines_for_current_time` 负责所有线条绘制。
                 self.line_vertices.clear();
 
                 // 由于拓扑数据已更新，需要重新计算所有线条（服务线条将基于默认时间0）
                 self.topology_needs_update = true;
                 self.fit_view_to_topology();
-            }
-            UserCommand::AddNode(node_data) => {
-                log::info!("Add node command received: {:?}", node_data);
-                // 这里您可以根据需要实现添加节点的逻辑，
-                // 并记得更新 `self.all_elements`, `self.node_id_to_idx`, `self.circle_instances`
-                // 并且将 `topology_needs_update` 设为 true，以便重新绘制。
-            }
-            UserCommand::RemoveNode(node_id) => {
-                log::info!("Remove node command received: {:?}", node_id);
-                // 同上，实现移除节点的逻辑，更新相关数据结构，并设置 `topology_needs_update = true`。
             }
             UserCommand::StateInitialized => {
                 // This command is handled in App::user_event
