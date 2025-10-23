@@ -431,6 +431,12 @@ impl State {
         // Update glyphon viewport
         let width = self.config.width;
         let height = self.config.height;
+
+        if width == 0 || height == 0 {
+            log::warn!("Attempting to render with zero width or height, skipping.");
+            return Ok(());
+        }
+
         self.glyphon_viewport.update(&self.queue, glyphon::Resolution { width, height });
 
         // --- Prepare Glyphon Text Areas ---
@@ -504,7 +510,7 @@ impl State {
             let mut text_height = 0.0;
             if let Some(run) = glyphon_buffer.layout_runs().next() {
                 text_width = run.line_w;
-                text_height = run.line_height * glyphon_buffer.layout_runs().count() as f32;
+                text_height = run.line_height * glyphon_buffer.layout_runs().count() as f32; // Sum of all line heights
             }
 
             // 根据屏幕半径和实际文本大小调整位置
@@ -588,5 +594,72 @@ impl State {
         self.glyphon_atlas.trim();
 
         Ok(())
+    }
+
+        /// 根据当前拓扑（`circle_instances`）调整相机位置和缩放，使其全部可见。
+    pub fn fit_view_to_topology(&mut self) {
+        if self.circle_instances.is_empty() {
+            // 如果没有节点，则将相机重置到默认视图
+            self.camera.position = glam::Vec2::ZERO;
+            self.camera.zoom = 1.0;
+            self.camera_needs_update = true;
+            return;
+        }
+
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        let mut max_node_radius = 0.0f32;
+
+        // 遍历所有节点实例以确定边界
+        for instance in &self.circle_instances {
+            min_x = min_x.min(instance.position[0]);
+            max_x = max_x.max(instance.position[0]);
+            // 注意：拓扑数据中的y坐标在加载时反转了 (-element.metadata.location.y)
+            // 所以这里直接使用 instance.position[1] 来计算世界坐标的 min/max Y
+            min_y = min_y.min(instance.position[1]);
+            max_y = max_y.max(instance.position[1]);
+            max_node_radius = max_node_radius.max(instance.radius_scale);
+        }
+
+        // 为了确保节点完全可见，扩大边界框，考虑到最大的节点半径
+        // 增加额外的边距，防止节点被裁剪
+        const PADDING_MULTIPLIER: f32 = 1.2; // 增加20%的额外空间
+        let padded_min_x = min_x - max_node_radius * PADDING_MULTIPLIER;
+        let padded_max_x = max_x + max_node_radius * PADDING_MULTIPLIER;
+        let padded_min_y = min_y - max_node_radius * PADDING_MULTIPLIER;
+        let padded_max_y = max_y + max_node_radius * PADDING_MULTIPLIER;
+
+        let bounding_box_width = padded_max_x - padded_min_x;
+        let bounding_box_height = padded_max_y - padded_min_y;
+
+        // 如果边界框尺寸过小（例如只有一个节点），设定一个最小可见尺寸以避免无限缩放
+        const MIN_VISIBLE_WORLD_DIM: f32 = 200.0; // 最小世界单位尺寸
+        let target_world_width = bounding_box_width.max(MIN_VISIBLE_WORLD_DIM);
+        let target_world_height = bounding_box_height.max(MIN_VISIBLE_WORLD_DIM);
+        
+        // 计算所需的缩放级别，以适应宽度和高度
+        let mut zoom_x = 1.0;
+        if self.camera.aspect_ratio > f32::EPSILON && target_world_width > f32::EPSILON {
+            zoom_x = (2.0 * self.camera.aspect_ratio) / target_world_width;
+        }
+
+        let mut zoom_y = 1.0;
+        if target_world_height > f32::EPSILON {
+            zoom_y = 2.0 / target_world_height;
+        }
+
+        // 为了确保所有内容都可见，我们选择两者中较小的缩放值（即更“缩小”的视图）
+        let new_zoom = zoom_x.min(zoom_y).clamp(0.001, 1000.0); // 限制缩放范围
+
+        // 设置新的相机中心位置
+        self.camera.position = glam::Vec2::new(
+            (padded_min_x + padded_max_x) / 2.0,
+            (padded_min_y + padded_max_y) / 2.0,
+        );
+        self.camera.zoom = new_zoom;
+        self.camera_needs_update = true; // 标记相机需要更新
+        log::info!("View fitted to topology. New camera position: {:?}, zoom: {}", self.camera.position, self.camera.zoom);
     }
 }

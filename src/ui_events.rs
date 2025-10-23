@@ -241,6 +241,7 @@ impl State {
                 } // End of services loop
 
                 self.update_gpu_buffers(); // Update GPU buffers after all line vertices (links + services) are added
+                self.fit_view_to_topology();
             }
             UserCommand::AddNode(node_data) => {
                 // Implement add node logic
