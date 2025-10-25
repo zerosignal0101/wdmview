@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::scene::service::ServiceData;
+use crate::scene::defrag_event::AnyEvent;
 
 use super::element::ElementData;
 use super::connection::ConnectionData;
@@ -9,5 +9,5 @@ use super::connection::ConnectionData;
 pub struct FullTopologyData {
     pub elements: Vec<ElementData>,
     pub connections: Vec<ConnectionData>,
-    pub services: Vec<ServiceData>,
+    pub defrag_timeline_events: Vec<AnyEvent>,
 }

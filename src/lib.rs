@@ -324,7 +324,7 @@ impl WasmApi {
         let command = UserCommand::SetFullTopology {
             elements: parsed_topology.elements,
             connections: parsed_topology.connections,
-            services: parsed_topology.services,
+            defrag_timeline_events: parsed_topology.defrag_timeline_events,
         };
 
         log::info!("Received SetFullTopology command from JS.");

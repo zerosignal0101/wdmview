@@ -3,6 +3,7 @@ use bevy_color::{Color, ColorToComponents, LinearRgba, Oklcha, Srgba};
 use glam::Vec2;
 use wgpu::util::DeviceExt;
 
+use crate::scene::defrag_event::AnyEvent;
 use crate::scene::network::FullTopologyData;
 use crate::scene::element::ElementData;
 use crate::scene::connection::ConnectionData;
@@ -17,7 +18,7 @@ pub enum UserCommand {
     SetFullTopology {
         elements: Vec<ElementData>,
         connections: Vec<ConnectionData>,
-        services: Vec<ServiceData>,
+        defrag_timeline_events: Vec<AnyEvent>,
     },
     StateInitialized, // Notifies App that State setup is complete
     SetTimeSelection(f32), // 新增：设置时间轴选中的时刻
@@ -26,9 +27,9 @@ pub enum UserCommand {
 impl State {
   pub fn process_command(&mut self, command: UserCommand) {
         match command {
-            UserCommand::SetFullTopology { elements, connections, services } => {
-                log::info!("Setting full topology with {} nodes, {} links, and {} services.",
-                            elements.len(), connections.len(), services.len());
+            UserCommand::SetFullTopology { elements, connections, defrag_timeline_events } => {
+                log::info!("Setting full topology with {} nodes, {} links, and {} events.",
+                            elements.len(), connections.len(), defrag_timeline_events.len());
 
                 // 清空并重新构建节点 ID 到索引的映射
                 self.node_id_to_idx.clear();
@@ -43,7 +44,7 @@ impl State {
                 // 存储所有连接数据
                 self.all_connections = connections;
                 // 存储所有服务数据
-                self.all_services = services;
+                self.all_events = defrag_timeline_events;
                 
                 // 根据节点数据创建圆形实例
                 let radius_inside = BASE_NODE_RADIUS;

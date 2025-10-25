@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 use crate::models::{Vertex2D, CircleInstance, LineVertex};
 use crate::camera::{Camera, CameraUniform};
 use crate::scene::connection::ConnectionData;
+use crate::scene::defrag_event::{reconstruct_state_at_time, AnyEvent};
 use crate::scene::service::ServiceData; // 引入 ServiceData
 use crate::scene::element::ElementData; // 引入 ElementData
 
@@ -56,7 +57,7 @@ pub struct State {
     // --- 新增时间轴和拓扑数据管理字段 ---
     pub all_elements: Vec<ElementData>, // 存储所有节点数据
     pub all_connections: Vec<ConnectionData>,
-    pub all_services: Vec<ServiceData>, // 存储所有服务数据
+    pub all_events: Vec<AnyEvent>, // 存储所有服务数据
     // 用于快速查找节点 ID 对应的 circle_instances 索引
     pub node_id_to_idx: HashMap<String, usize>,
     pub current_time_selection: f32, // 当前时间轴选中的时刻
@@ -397,7 +398,7 @@ impl State {
             // --- 新增字段初始化 ---
             all_elements: Vec::new(),
             all_connections: Vec::new(),
-            all_services: Vec::new(),
+            all_events: Vec::new(),
             node_id_to_idx: HashMap::new(),
             current_time_selection: 0.0, // 默认初始时间为 0
             topology_needs_update: false,
@@ -540,7 +541,9 @@ impl State {
         const MAX_WAVELENGTHS: u32 = 80;
         const SERVICE_MAX_SPREAD_ANGLE: f32 = LINK_BOUNDARY_ROTATE_ANGLE * 0.95;
 
-        for service in &self.all_services {
+        let reconstructed_service_dict = reconstruct_state_at_time(&self.all_events, self.current_time_selection);
+
+        for service in reconstructed_service_dict.values() {
             let departure_time = service.departure_time;
             // 检查服务是否在当前时间活跃
             if self.current_time_selection >= service.arrival_time && self.current_time_selection < departure_time {
