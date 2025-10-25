@@ -61,6 +61,13 @@ pub struct State {
     // 用于快速查找节点 ID 对应的 circle_instances 索引
     pub node_id_to_idx: HashMap<String, usize>,
     pub current_time_selection: f32, // 当前时间轴选中的时刻
+
+    pub highlight_service_id_list: Option<Vec<i32>>, // 当前选中的碎片整理过程，围绕这一 id，需要高亮
+    pub highlight_line_render_pipeline: wgpu::RenderPipeline, // 新增高亮线路渲染管线
+    pub highlight_line_vertices: Vec<LineVertex>,             // 新增高亮线路顶点数据
+    pub highlight_line_vertex_buffer: wgpu::Buffer,           // 新增高亮线路顶点缓冲区
+    pub highlight_node_color: [f32; 4], // 高亮节点的颜色
+
     pub topology_needs_update: bool, // 标记拓扑（主要是服务线路）是否需要因时间变化而更新
 
     pub mouse_current_pos_screen: Vec2,
@@ -384,6 +391,61 @@ impl State {
             }
         );
 
+        // --- 高亮线段着色器模块 ---
+        let highlight_lines_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Highlight Lines Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("./shaders/highlight_lines.wgsl").into()),
+        });
+
+        // --- 高亮线段渲染管线 ---
+        let highlight_line_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Highlight Line Render Pipeline"),
+            layout: Some(&render_pipeline_layout), // 共用布局
+            vertex: wgpu::VertexState {
+                module: &highlight_lines_shader_module,
+                entry_point: Some("vs_main"), // 可以是与 lines.wgsl 相同的 vs_main
+                buffers: &[
+                    LineVertex::layout(), // 同样使用 LineVertex 布局
+                ],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &highlight_lines_shader_module,
+                entry_point: Some("fs_main"), // 可以是与 lines.wgsl 相同的 fs_main
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: texture_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList, // 关键：使用 TriangleList
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // 双面渲染，因为四边形可能被裁剪
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        let highlight_line_vertex_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Highlight Line Vertex Buffer"),
+                contents: bytemuck::cast_slice(&[] as &[LineVertex]), // 初始为空
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
         Ok( Self {
             surface, device, queue, config, is_surface_configured: false,
             glyphon_font_system, glyphon_swash_cache, glyphon_viewport,
@@ -400,6 +462,11 @@ impl State {
             all_events: Vec::new(),
             node_id_to_idx: HashMap::new(),
             current_time_selection: 0.0, // 默认初始时间为 0
+            highlight_service_id_list: None,
+            highlight_line_render_pipeline,
+            highlight_line_vertices: Vec::new(),
+            highlight_line_vertex_buffer,
+            highlight_node_color: LinearRgba::from(Srgba::rgb_u8(0xd2, 0xa1, 0x06)).to_f32_array(), // 黄色 40
             topology_needs_update: false,
         })
     }
@@ -479,16 +546,92 @@ impl State {
         } else {
             self.queue.write_buffer(&self.line_vertex_buffer, 0, line_data);
         }
+
+        let highlight_line_data = bytemuck::cast_slice(&self.highlight_line_vertices);
+        if self.highlight_line_vertex_buffer.size() < highlight_line_data.len() as u64 {
+            self.highlight_line_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Highlight Line Vertex Buffer (Resized)"),
+                contents: highlight_line_data,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+        } else {
+            self.queue.write_buffer(&self.highlight_line_vertex_buffer, 0, highlight_line_data);
+        }
+    }
+
+    // Helper to generate a thick line (quad) from two points
+    fn add_thick_line_segment(
+        &mut self,
+        start_pos: Vec2,
+        end_pos: Vec2,
+        color: [f32; 4],
+        thickness: f32, // 世界单位厚度
+    ) {
+        let dir = end_pos - start_pos;
+        let length = dir.length();
+
+        if length < f32::EPSILON {
+            return; // Avoid division by zero for zero-length lines
+        }
+
+        let normalized_dir = dir.normalize();
+        let perpendicular_dir = Vec2::new(-normalized_dir.y, normalized_dir.x); // 旋转90度
+
+        let half_thickness_offset = perpendicular_dir * (thickness / 2.0); // 注意：厚度需要反比例于缩放，以在屏幕上保持一致的像素宽度
+
+        let p1_minus_offset = start_pos - half_thickness_offset;
+        let p1_plus_offset = start_pos + half_thickness_offset;
+        let p2_plus_offset = end_pos + half_thickness_offset;
+        let p2_minus_offset = end_pos - half_thickness_offset;
+
+        // 添加构成两个三角形的六个顶点
+        self.highlight_line_vertices.push(LineVertex { position: p1_minus_offset.into(), color });
+        self.highlight_line_vertices.push(LineVertex { position: p1_plus_offset.into(), color });
+        self.highlight_line_vertices.push(LineVertex { position: p2_plus_offset.into(), color }); // Triangle 1: (p1-, p1+, p2+)
+
+        self.highlight_line_vertices.push(LineVertex { position: p1_minus_offset.into(), color });
+        self.highlight_line_vertices.push(LineVertex { position: p2_plus_offset.into(), color });
+        self.highlight_line_vertices.push(LineVertex { position: p2_minus_offset.into(), color }); // Triangle 2: (p1-, p2+, p2-)
     }
 
     /// 根据当前时间轴选择，重新生成所有链接和服务的线条。
     fn generate_all_lines_for_current_time(&mut self) {
-        self.line_vertices.clear(); // 清除所有旧线条
+        self.line_vertices.clear();
+        self.highlight_line_vertices.clear(); // 清除高亮线条数据
 
         let radius_inside = BASE_NODE_RADIUS;
         const LINK_BOUNDARY_ROTATE_ANGLE: f32 = std::f32::consts::PI / 16.0;
+        const HIGHLIGHT_LINE_THICKNESS: f32 = 0.5; // 世界单位厚度
+        const NORMAL_LINE_COLOR: [f32; 4] = [0.784, 0.784, 0.784, 1.0]; // 灰色，从 Srgba::rgb_u8(200, 200, 200).to_f32_array()
 
-        // --- 1. 渲染固定的链路边界 ---
+        // 追踪所有被高亮服务触及的节点ID
+        let mut nodes_in_highlighted_services: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(ref highlight_ids) = self.highlight_service_id_list {
+            let reconstructed_service_dict = reconstruct_state_at_time(&self.all_events, self.current_time_selection);
+            for service_id in highlight_ids {
+                if let Some(service) = reconstructed_service_dict.get(service_id) {
+                    // Collect all nodes in path for highlighting
+                    for node_id in &service.path {
+                        nodes_in_highlighted_services.insert(node_id.clone());
+                    }
+                }
+            }
+        }
+
+        // --- 1. 更新节点颜色 ---
+        // 首先恢复所有节点为默认颜色
+        for instance in self.circle_instances.iter_mut() {
+            instance.color = LinearRgba::from(Srgba::rgb_u8(0x00, 0x5d, 0x5d)).to_f32_array();
+        }
+        // 然后根据高亮列表重新着色
+        for (node_id, &instance_idx) in &self.node_id_to_idx {
+            if nodes_in_highlighted_services.contains(node_id) {
+                self.circle_instances[instance_idx].color = self.highlight_node_color;
+            }
+        }
+
+
+        // --- 2. 渲染固定的链路边界 (普通细线) ---
         for link in &self.all_connections {
             if let (Some(&source_idx), Some(&target_idx)) = (
                 self.node_id_to_idx.get(&link.from_node),
@@ -500,29 +643,25 @@ impl State {
                 let dir_vec = destination_position_center - source_position_center;
                 let length = dir_vec.length();
 
-                // Avoid division by zero or rendering extremely short segments
                 if length < f32::EPSILON {
                     continue;
                 }
 
                 let normalized_dir = dir_vec.normalize();
-                let radius_dir_outward = normalized_dir * radius_inside; // Vector from source center to circumference, outward
+                let radius_dir_outward = normalized_dir * radius_inside;
 
                 let rotate_vector = Vec2::from_angle(LINK_BOUNDARY_ROTATE_ANGLE);
                 let reverse_rotate_vector = Vec2::from_angle(-LINK_BOUNDARY_ROTATE_ANGLE);
 
-                // Upper boundary line
                 self.line_vertices.push(LineVertex {
                     position: (source_position_center + radius_dir_outward.rotate(rotate_vector)).into(),
                     color: link_boundary_color.to_f32_array(),
                 });
                 self.line_vertices.push(LineVertex {
-                    // Target point: from target center, move inward along dir_vec, then rotate
                     position: (destination_position_center - radius_dir_outward.rotate(reverse_rotate_vector)).into(),
                     color: link_boundary_color.to_f32_array(),
                 });
 
-                // Lower boundary line
                 self.line_vertices.push(LineVertex {
                     position: (source_position_center + radius_dir_outward.rotate(reverse_rotate_vector)).into(),
                     color: link_boundary_color.to_f32_array(),
@@ -536,7 +675,7 @@ impl State {
             }
         }
 
-        // --- 2. 渲染当前时间活跃的服务线条 ---
+        // --- 3. 渲染当前时间活跃的服务线条 ---
         const MAX_WAVELENGTHS: u32 = 80;
         const SERVICE_MAX_SPREAD_ANGLE: f32 = LINK_BOUNDARY_ROTATE_ANGLE * 0.95;
 
@@ -550,8 +689,26 @@ impl State {
                 let effective_wavelength = (wavelength as f32).min((MAX_WAVELENGTHS - 1) as f32);
 
                 let hue_color = (effective_wavelength + 0.5) / (MAX_WAVELENGTHS as f32) * 180.0 + 30.0;
-                let service_color_oklcha = Oklcha::lch(0.7289, 0.11, hue_color);
+
+                let is_highlighted = match &self.highlight_service_id_list {
+                    Some(highlight_service_id_list) => highlight_service_id_list.iter().any(|&srv_id| srv_id == service.service_id),
+                    None => false,
+                };
+
+                let service_color_oklcha = if is_highlighted {
+                    // 高亮服务的颜色可以更鲜明，例如保持高饱和度，但亮度适中，或者采用完全不同的颜色
+                    Oklcha::lch(0.75, 0.2, hue_color) // 更亮的颜色
+                } else {
+                    if self.highlight_service_id_list.iter().len() == 0{
+                        Oklcha::lch(0.6, 0.11, hue_color)
+                    }
+                    else {
+                        Oklcha::lch(0.4, 0.11, hue_color)
+                    }
+                };
                 let service_color_f32 = LinearRgba::from(service_color_oklcha).to_f32_array();
+                // 如果不是高亮服务，亮度调整回默认的0.6。
+                // `service_color_f32` will be determined by `is_highlighted`.
 
                 let normalized_wavelength_factor = (effective_wavelength - ((MAX_WAVELENGTHS as f32 - 1.0) / 2.0)) / ((MAX_WAVELENGTHS as f32 - 1.0) / 2.0);
                 let wavelength_rotate_angle = normalized_wavelength_factor * SERVICE_MAX_SPREAD_ANGLE;
@@ -581,14 +738,12 @@ impl State {
                         let service_start_pos = source_pos_center + radius_vec_along_link.rotate(Vec2::from_angle(wavelength_rotate_angle * upward_sacle));
                         let service_end_pos = target_pos_center - radius_vec_along_link.rotate(Vec2::from_angle( - wavelength_rotate_angle * upward_sacle));
 
-                        self.line_vertices.push(LineVertex {
-                            position: service_start_pos.into(),
-                            color: service_color_f32,
-                        });
-                        self.line_vertices.push(LineVertex {
-                            position: service_end_pos.into(),
-                            color: service_color_f32,
-                        });
+                        if is_highlighted {
+                            self.add_thick_line_segment(service_start_pos, service_end_pos, service_color_f32, HIGHLIGHT_LINE_THICKNESS);
+                        } else {
+                            self.line_vertices.push(LineVertex { position: service_start_pos.into(), color: service_color_f32 });
+                            self.line_vertices.push(LineVertex { position: service_end_pos.into(), color: service_color_f32 });
+                        }
                     } else {
                         log::warn!(
                             "Service {} path references non-existent node ID. Segment: {} -> {}",
@@ -617,28 +772,26 @@ impl State {
 
                         let normalized_source_middle_dir = source_middle_dir_vec.normalize();
                         let normalized_middle_target_dir = middle_target_dir_vec.normalize();
-                        
+
                         let radius_source_middle_vec_along_link = normalized_source_middle_dir * radius_inside;
                         let radius_middle_target_vec_along_link = normalized_middle_target_dir * radius_inside;
 
                         let source_middle_upward_sacle: f32 = if normalized_source_middle_dir.y >= 0.0 { 1.0 } else { -1.0 };
                         let middle_target_upward_sacle: f32 = if normalized_middle_target_dir.y >= 0.0 { 1.0 } else { -1.0 };
-                        
+
                         let middle_start_pos = middle_pos_center + radius_source_middle_vec_along_link.rotate(Vec2::from_angle(wavelength_rotate_angle * source_middle_upward_sacle));
                         let middle_end_pos = middle_pos_center - radius_middle_target_vec_along_link.rotate(Vec2::from_angle( - wavelength_rotate_angle * middle_target_upward_sacle));
 
-                        self.line_vertices.push(LineVertex {
-                            position: middle_start_pos.into(),
-                            color: service_color_f32,
-                        });
-                        self.line_vertices.push(LineVertex {
-                            position: middle_end_pos.into(),
-                            color: service_color_f32,
-                        });
+                        if is_highlighted {
+                            self.add_thick_line_segment(middle_start_pos, middle_end_pos, service_color_f32, HIGHLIGHT_LINE_THICKNESS);
+                        } else {
+                            self.line_vertices.push(LineVertex { position: middle_start_pos.into(), color: service_color_f32 });
+                            self.line_vertices.push(LineVertex { position: middle_end_pos.into(), color: service_color_f32 });
+                        }
                     } else {
                         log::warn!(
-                            "Service {} path references non-existent node ID. Segment: {} -> {}",
-                            service.service_id, source_node_id, target_node_id
+                            "Service {} path references non-existent node ID. Segment: {} -> {} -> {}",
+                            service.service_id, source_node_id, middle_node_id, target_node_id
                         );
                     }
                 }
@@ -793,6 +946,7 @@ impl State {
 
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
+            // 1. 绘制圆形（节点）
             render_pass.set_pipeline(&self.circle_render_pipeline);
             render_pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.circle_instance_buffer.slice(..));
@@ -803,10 +957,18 @@ impl State {
                 0..self.circle_instances.len() as u32,
             );
 
+            // 2. 绘制普通线段 (链路边界和服务)
             render_pass.set_pipeline(&self.line_render_pipeline);
             render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
             render_pass.draw(0..self.line_vertices.len() as u32, 0..1);
 
+            // 3. 绘制高亮线段 (覆盖在普通线段之上)
+            if self.highlight_line_vertices.len() != 0 {
+                render_pass.set_pipeline(&self.highlight_line_render_pipeline);
+                render_pass.set_vertex_buffer(0, self.highlight_line_vertex_buffer.slice(..));
+                render_pass.draw(0..self.highlight_line_vertices.len() as u32, 0..1);
+            }
+            
             // --- Draw Glyphon Text ---
             self.glyphon_renderer.render(&self.glyphon_atlas, &self.glyphon_viewport, &mut render_pass).unwrap();
         }

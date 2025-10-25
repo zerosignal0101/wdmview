@@ -28,13 +28,12 @@ pub enum UserCommand {
 }
 
 impl State {
-  pub fn process_command(&mut self, command: UserCommand) {
+    pub fn process_command(&mut self, command: UserCommand) {
         match command {
             UserCommand::SetFullTopology { elements, connections, defrag_timeline_events } => {
                 log::info!("Setting full topology with {} nodes, {} links, and {} events.",
                             elements.len(), connections.len(), defrag_timeline_events.len());
 
-                // 清空并重新构建节点 ID 到索引的映射
                 self.node_id_to_idx.clear();
                 self.node_id_to_idx = elements
                     .iter()
@@ -42,75 +41,86 @@ impl State {
                     .map(|(i, element)| (element.element_id.clone(), i))
                     .collect();
 
-                // 存储所有节点数据
                 self.all_elements = elements;
-                // 存储所有连接数据
                 self.all_connections = connections;
-                // 存储所有服务数据
                 self.all_events = defrag_timeline_events;
                 
-                // 根据节点数据创建圆形实例
-                let radius_inside = BASE_NODE_RADIUS;
+                // 初始化（或重置）所有节点的默认颜色
+                let default_node_color = LinearRgba::from(Srgba::rgb_u8(0x00, 0x5d, 0x5d)).to_f32_array();
                 self.circle_instances = self.all_elements
                     .iter()
                     .map(|element| CircleInstance {
                         position: [element.metadata.location.x, -element.metadata.location.y],
-                        radius_scale: radius_inside + 0.2,
-                        color: LinearRgba::from(Srgba::rgb_u8(0x00, 0x5d, 0x5d)).to_f32_array(),
+                        radius_scale: BASE_NODE_RADIUS + 0.2, // 初始半径
+                        color: default_node_color, // 初始颜色
                     })
                     .collect();
 
                 self.line_vertices.clear();
+                self.highlight_line_vertices.clear(); // 清空高亮线条
 
-                // 由于拓扑数据已更新，需要重新计算所有线条（服务线条将基于默认时间0）
                 self.topology_needs_update = true;
+                self.current_time_selection = 0.0; // Reset time to 0
+                self.highlight_service_id_list = None; // Clear highlight
                 self.fit_view_to_topology();
             }
             UserCommand::StateInitialized => {
-                // This command is handled in App::user_event
+                // ...
             }
             UserCommand::SetTimeSelection(time) => {
-                // 只有当时间有实际变化时才更新，避免不必要的重新计算
                 if (self.current_time_selection - time).abs() > f32::EPSILON {
                     self.current_time_selection = time;
-                    self.topology_needs_update = true; // 标记服务线路需要更新
+                    self.highlight_service_id_list = None; // 清除高亮服务
+                    self.topology_needs_update = true;
                     log::debug!("Time selection updated to: {}", time);
                 }
             }
             UserCommand::SetHighlightDefragService(selected_service_id) => {
-                let mut reallocation_service_id_vec = Vec::new();
-                let defrag_search_result: Option<&ServiceData> = self.all_events.iter().find_map(|event| {
+                let mut highlight_service_id_vec = Vec::new();
+                let mut arrival_time_for_highlight = 0.0;
+                let mut found_service = false;
+
+                // 遍历所有事件，找出与 selected_service_id 相关的所有服务ID
+                for event in &self.all_events {
                     match event {
                         AnyEvent::Allocation { service_id, details, .. } => {
-                            (*service_id == selected_service_id).then_some(details)
-                        }
-                        AnyEvent::Reallocation { timestamp, service_id, details } => {
-                            if selected_service_id == details.defrag_service_id {
-                                reallocation_service_id_vec.push(*service_id);
+                            if selected_service_id == *service_id {
+                                highlight_service_id_vec.push(*service_id);
+                                arrival_time_for_highlight = details.arrival_time;
+                                found_service = true;
                             }
-                            None
                         }
-                        _ => {
-                            None
+                        AnyEvent::Reallocation { service_id, details, .. } => {
+                            // 如果 re-allocation 的来源是 selected_service_id
+                            if selected_service_id == details.defrag_service_id {
+                                highlight_service_id_vec.push(*service_id);
+                                // 如果主要服务还没找到，则将此 reallocation 的 arrival_time 作为时间起点
+                                if !found_service {
+                                    arrival_time_for_highlight = details.service.arrival_time;
+                                    // 注意：这里可能需要更复杂的逻辑来确定一个合理的起始时间，
+                                    // 比如找到所有相关服务中最早的 arrival_time
+                                    found_service = true;
+                                }
+                            }
                         }
+                        _ => {}
                     }
-                });
+                }
 
-                match defrag_search_result {
-                    Some(service_data) => {
-                        log::info!(
-                            "Reallocation Service IDs: {}",
-                            reallocation_service_id_vec
-                                .iter()
-                                .map(|id| format!("{}", id))
-                                .join(", ")
-                        );
-                        self.current_time_selection = service_data.arrival_time - EPSILON;
-                        self.topology_needs_update = true;
-                    }
-                    None => {
-                        return;
-                    }
+                if found_service && !highlight_service_id_vec.is_empty() {
+                    log::info!(
+                        "Highlight Service IDs: {:?}",
+                        highlight_service_id_vec,
+                    );
+                    // 将时间设置到找到服务的开始时间，稍微加一点 EPSILON 确保在活跃期内
+                    self.current_time_selection = arrival_time_for_highlight + EPSILON;
+                    self.highlight_service_id_list = Some(highlight_service_id_vec);
+                    self.topology_needs_update = true; // 标记需要更新拓扑以显示高亮
+                    self.fit_view_to_topology(); // 可能需要重新调整视角
+                } else {
+                    log::warn!("Service ID {} not found or is not a defragmentation service.", selected_service_id);
+                    self.highlight_service_id_list = None; // 确保清除高亮
+                    self.topology_needs_update = true;
                 }
             }
         }
