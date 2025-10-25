@@ -7,6 +7,7 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+itertools = "0.14"
 bytemuck = { version = "1.24", features = [
     "extern_crate_alloc",
     "min_const_generics",

@@ -2,15 +2,6 @@ use serde::Deserialize;
 use super::service::ServiceData;
 use std::collections::HashMap;
 
-// Using derive macros to automatically implement features.
-// - Deserialize: Allows creating this struct from data formats like JSON.
-// - Debug: Allows printing the struct for debugging using `{:?}`.
-// - Clone: Allows making copies of the struct, which is useful for our state map.
-#[derive(Deserialize, Debug, Clone)]
-pub struct DefragResult {
-    blocknum1: i32,
-    blocknum2: i32,
-}
 
 // ReallocationDetails "inherits" DefragService in Python.
 // In Rust, we represent this with composition. The #[serde(flatten)] attribute
@@ -56,11 +47,6 @@ pub enum AnyEvent {
         service_id: i32,
         details: ReleaseExpiredDetails,
     },
-    // Note: Python adds a 'RELEASE_DEFRAG' case. We can add it easily here if needed.
-    // ReleaseDefrag {
-    //     timestamp: f32,
-    //     service_id: i32,
-    // },
     Reallocation {
         timestamp: f32,
         service_id: i32,
@@ -81,25 +67,12 @@ impl AnyEvent {
 }
 
 
-#[derive(Deserialize, Debug)]
-pub struct DefragResponse {
-    pub result: DefragResult,
-    pub defrag_timeline_events: Vec<AnyEvent>,
-}
-
 /// Reconstructs the service dictionary state at a specific target time
 /// by replaying events from a timeline.
 pub fn reconstruct_state_at_time(
     timeline_events: &[AnyEvent],
     target_time: f32,
 ) -> HashMap<i32, ServiceData> {
-    // The Python code sorts the events. Assuming they might not be sorted,
-    // we can do that here. If they are guaranteed to be sorted, this can be skipped.
-    // Note: This requires cloning the events. A more efficient way would be to sort
-    // a vector of indices, but for clarity, we'll clone.
-    // let mut sorted_events: Vec<AnyEvent> = timeline_events.to_vec();
-    // sorted_events.sort_by(|a, b| a.timestamp().partial_cmp(&b.timestamp()).unwrap());
-
     // We initialize our state map. The key is the service ID.
     let mut reconstructed_service_dict: HashMap<i32, ServiceData> = HashMap::new();
 
@@ -123,10 +96,6 @@ pub fn reconstruct_state_at_time(
                 // Remove the service from the map.
                 reconstructed_service_dict.remove(service_id);
             }
-            // Add a case for `RELEASE_DEFRAG` if you model it in the enum
-            // AnyEvent::ReleaseDefrag { service_id, .. } => {
-            //     reconstructed_service_dict.remove(service_id);
-            // }
             AnyEvent::Reallocation { service_id, details, .. } => {
                 // Convert the ReallocationDetails into a DefragService using our
                 // `From` implementation and update the map.

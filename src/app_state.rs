@@ -57,7 +57,7 @@ pub struct State {
     // --- 新增时间轴和拓扑数据管理字段 ---
     pub all_elements: Vec<ElementData>, // 存储所有节点数据
     pub all_connections: Vec<ConnectionData>,
-    pub all_events: Vec<AnyEvent>, // 存储所有服务数据
+    pub all_events: Vec<AnyEvent>, // 存储所有事件变化数据
     // 用于快速查找节点 ID 对应的 circle_instances 索引
     pub node_id_to_idx: HashMap<String, usize>,
     pub current_time_selection: f32, // 当前时间轴选中的时刻
@@ -142,7 +142,6 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // --- Glyphon Initialization ---
         // --- Glyphon Initialization ---
         let mut glyphon_font_system = glyphon::FontSystem::new_with_fonts([
             glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(

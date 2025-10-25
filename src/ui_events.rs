@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::f32::EPSILON;
 use bevy_color::{Color, ColorToComponents, LinearRgba, Oklcha, Srgba};
 use glam::Vec2;
+use itertools::Itertools;
 use wgpu::util::DeviceExt;
 
 use crate::scene::defrag_event::AnyEvent;
@@ -22,6 +24,7 @@ pub enum UserCommand {
     },
     StateInitialized, // Notifies App that State setup is complete
     SetTimeSelection(f32), // 新增：设置时间轴选中的时刻
+    SetHighlightDefragService(i32),
 }
 
 impl State {
@@ -72,6 +75,42 @@ impl State {
                     self.current_time_selection = time;
                     self.topology_needs_update = true; // 标记服务线路需要更新
                     log::debug!("Time selection updated to: {}", time);
+                }
+            }
+            UserCommand::SetHighlightDefragService(selected_service_id) => {
+                let mut reallocation_service_id_vec = Vec::new();
+                let defrag_search_result: Option<&ServiceData> = self.all_events.iter().find_map(|event| {
+                    match event {
+                        AnyEvent::Allocation { service_id, details, .. } => {
+                            (*service_id == selected_service_id).then_some(details)
+                        }
+                        AnyEvent::Reallocation { timestamp, service_id, details } => {
+                            if selected_service_id == details.defrag_service_id {
+                                reallocation_service_id_vec.push(*service_id);
+                            }
+                            None
+                        }
+                        _ => {
+                            None
+                        }
+                    }
+                });
+
+                match defrag_search_result {
+                    Some(service_data) => {
+                        log::info!(
+                            "Reallocation Service IDs: {}",
+                            reallocation_service_id_vec
+                                .iter()
+                                .map(|id| format!("{}", id))
+                                .join(", ")
+                        );
+                        self.current_time_selection = service_data.arrival_time - EPSILON;
+                        self.topology_needs_update = true;
+                    }
+                    None => {
+                        return;
+                    }
                 }
             }
         }
