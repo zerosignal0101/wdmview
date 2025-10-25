@@ -541,7 +541,7 @@ impl State {
         const SERVICE_MAX_SPREAD_ANGLE: f32 = LINK_BOUNDARY_ROTATE_ANGLE * 0.95;
 
         for service in &self.all_services {
-            let departure_time = service.arrival_time + service.holding_time;
+            let departure_time = service.departure_time;
             // 检查服务是否在当前时间活跃
             if self.current_time_selection >= service.arrival_time && self.current_time_selection < departure_time {
                 let wavelength = service.wavelength;

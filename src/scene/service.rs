@@ -6,7 +6,7 @@ pub struct ServiceData {
     pub source_id: String,
     pub destination_id: String,
     pub arrival_time: f32,
-    pub holding_time: f32,
+    pub departure_time: f32,
     pub bit_rate: f32,
     pub modulation: Option<String>, // 使用 Option<String> 因为 JSON 中是 "modulation": null
     pub power: f32,
