@@ -1,4 +1,5 @@
-use std::{collections::HashMap, sync::Arc, sync::Mutex};
+use std::{collections::HashMap, str::FromStr, sync::{Arc, Mutex}};
+use std::sync::atomic::{AtomicBool, Ordering};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -34,8 +35,12 @@ use scene::network::FullTopologyData;
 static WASM_API_INSTANCE: OnceCell<WasmApi> = OnceCell::new();
 
 #[cfg(target_arch = "wasm32")]
-static WASM_READY_FLUME_CHANNEL: OnceCell<(flume::Sender<()>, flume::Receiver<()>)> = OnceCell::new();
+static ALREADY_SETUP_FLAG: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_arch = "wasm32")]
+static WASM_READY_FLUME_CHANNEL: OnceCell<(flume::Sender<()>, flume::Receiver<()>)> = OnceCell::new();
+#[cfg(target_arch = "wasm32")]
+static CANVAS_READY_FLUME_CHANNEL: OnceCell<(flume::Sender<()>, flume::Receiver<()>)> = OnceCell::new();
 
 struct App {
     window: Option<Arc<Window>>,
@@ -69,10 +74,10 @@ impl App {
     fn get_window_size(&self) -> Option<winit::dpi::PhysicalSize<u32>> {
         self.window.as_ref().map(|w| w.inner_size())
     }
-}
 
-impl ApplicationHandler<UserCommand> for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    // ++ New helper function to create window and state
+    fn create_window_and_state(&mut self, event_loop: &ActiveEventLoop, canvas_id: String) {
+        log::info!("Attempting to create window and state for canvas: {}", canvas_id);
         let mut window_attributes = Window::default_attributes()
             .with_title("WDMView Graph Topology");
 
@@ -81,11 +86,16 @@ impl ApplicationHandler<UserCommand> for App {
             use wasm_bindgen::JsCast;
             use winit::platform::web::WindowAttributesExtWebSys;
 
-            const CANVAS_ID: &str = "canvas";
-
             let window = wgpu::web_sys::window().unwrap_throw();
             let document = window.document().unwrap_throw();
-            let canvas = document.get_element_by_id(CANVAS_ID).unwrap_throw();
+            let canvas = match document.get_element_by_id(canvas_id.as_str()) {
+                Some(c) => c,
+                None => {
+                    log::error!("Failed to find canvas with id: {}", canvas_id);
+                    // Optionally, you could send an error back to JS here.
+                    return;
+                }
+            };
             let html_canvas_element = canvas.unchecked_into();
             window_attributes = window_attributes.with_canvas(Some(html_canvas_element));
         }
@@ -105,16 +115,14 @@ impl ApplicationHandler<UserCommand> for App {
 
         #[cfg(target_arch = "wasm32")]
         {
-            // Clone Arc<Mutex<Option<State>>> and Arc<Window> for the async task
             let state_arc_for_spawn = self.state.clone();
-            let window_for_state_new = window.clone(); // Pass clone to State::new
             let proxy_for_init_notification = self.proxy.as_ref().expect("App proxy not set").clone();
 
             wasm_bindgen_futures::spawn_local(async move {
-                match State::new(window_for_state_new.clone()).await { // Use clone for State::new
+                match State::new(window.clone()).await {
                     Ok(mut state_instance) => {
-                        log::info!("WASM State created in async task.");
-                        let initial_size = window_for_state_new.inner_size();
+                        log::info!("WASM State created for canvas: {}", canvas_id);
+                        let initial_size = window.inner_size();
                         state_instance.resize(initial_size.width, initial_size.height);
 
                         {
@@ -131,30 +139,84 @@ impl ApplicationHandler<UserCommand> for App {
             });
         }
     }
+}
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserCommand) {
+impl ApplicationHandler<UserCommand> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // -- REMOVE: Do not create a window on startup anymore!
+        // self.create_window_and_state(event_loop, String::from_str("canvas").unwrap());
+        log::info!("Winit event loop resumed and is active. Waiting for commands.");
+
+        // We can signal that the API is ready now, even without a view.
+        #[cfg(target_arch = "wasm32")]
+        if let Some((sender, _)) = WASM_READY_FLUME_CHANNEL.get() {
+            if let Err(e) = sender.send(()) {
+                log::error!("Failed to send WASM ready signal: {:?}", e);
+            }
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserCommand) {
         match event {
+            // ++ NEW: Handle attaching the canvas
+            UserCommand::AttachCanvas(canvas_id) => {
+                // Prevent re-attaching if already attached
+                if self.window.is_some() {
+                    log::warn!("AttachCanvas called, but a window already exists. Ignoring.");
+                    return;
+                }
+                log::info!("Received AttachCanvas command for id: {}", canvas_id);
+                self.create_window_and_state(event_loop, canvas_id);
+            }
+
             UserCommand::StateInitialized => {
-                log::info!("WASM State initialized and ready.");
-                // Signal to the promise resolver
+                log::info!("State initialized and ready for rendering.");
+                
                 #[cfg(target_arch = "wasm32")]
-                if let Some((sender, _)) = WASM_READY_FLUME_CHANNEL.get() {
+                if let Some((sender, _)) = CANVAS_READY_FLUME_CHANNEL.get() {
                     if let Err(e) = sender.send(()) {
-                        log::error!("Failed to send WASM ready signal: {:?}", e);
+                        log::error!("Failed to send CANVAS attach ready signal: {:?}", e);
                     }
                 }
+
                 if let Some(w_handle) = self.window.as_ref() {
                     w_handle.request_redraw();
                 }
             }
-            _ => {
+            
+            // ++ MODIFIED: Handle destroying the view
+            UserCommand::DestroyView => {
+                log::info!("Received DestroyView command.");
+                
+                if self.window.is_none() {
+                    log::warn!("DestroyView called, but no window exists. Ignoring.");
+                    return;
+                }
+
+                log::info!("Destroying window and state.");
+                // Dropping the State will release wgpu resources.
+                if let Ok(mut state_guard) = self.state.try_lock() {
+                    *state_guard = None;
+                } else {
+                    log::error!("Could not lock state to destroy it.");
+                }
+                
+                // Dropping the Window will detach it from the canvas.
+                self.window = None;
+
+                // -- IMPORTANT: DO NOT EXIT THE EVENT LOOP!
+                // event_loop.exit();
+            }
+
+            _ => { // All other commands are processed by the state
+                // Lock the state, check if it exists, and then process
                 if let Some(state) = &mut *self.state.lock().unwrap() {
                     state.process_command(event);
                     if let Some(w_handle) = self.window.as_ref() {
-                        w_handle.request_redraw(); // Request redraw after processing command
+                        w_handle.request_redraw();
                     }
                 } else {
-                    log::warn!("Received a command before state was initialized (via proxy). Ignoring: {:?}", event);
+                    log::warn!("Received a command {:?} but state is not initialized (no view attached). Ignoring.", event);
                 }
             }
         }
@@ -171,7 +233,10 @@ impl ApplicationHandler<UserCommand> for App {
             return;
         };
 
-        let window_handle = self.window.as_ref().unwrap();
+        let Some(window_handle) = self.window.as_ref() else {
+            log::warn!("Window event received before window was initialized, ignoring.");
+            return;
+        };
 
         let mut needs_redraw = false;
 
@@ -281,9 +346,12 @@ pub fn run() -> anyhow::Result<()> {
         console_error_panic_hook::set_once();
         console_log::init_with_level(log::Level::Info).unwrap_throw();
         log::info!("Starting WDMView application.");
-        let (sender, receiver) = flume::unbounded();
-        WASM_READY_FLUME_CHANNEL.set((sender, receiver))
+        let (sender_wasm, receiver_wasm) = flume::unbounded();
+        WASM_READY_FLUME_CHANNEL.set((sender_wasm, receiver_wasm))
             .expect("Failed to initialize WASM_READY_CHANNEL. This should not happen.");
+        let (sender_canvas, receiver_canvas) = flume::unbounded();
+        CANVAS_READY_FLUME_CHANNEL.set((sender_canvas, receiver_canvas))
+            .expect("Failed to initialize CANVAS_READY_FLUME_CHANNEL. This should not happen.");
         log::info!("WASM ready channel created and stored.");
     }
 
@@ -298,11 +366,33 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(start)]
+#[wasm_bindgen]
 pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
-    log::info!("WASM started: Calling run().");
-    run().unwrap_throw();
+    log::info!("WASM started: Calling run() to start event loop.");
+    // This now only starts the event loop and creates the proxy.
+    // It will block the main JS thread if not run in a worker,
+    // but winit handles this correctly for web.
+    if ALREADY_SETUP_FLAG.load(Ordering::Acquire) {
+        log::warn!("Already setup eventloop and wasmapi, just go next.");
+        if let Some((sender, _)) = WASM_READY_FLUME_CHANNEL.get() {
+            if let Err(e) = sender.send(()) {
+                log::error!("Failed to send WASM ready signal: {:?}", e);
+            }
+        }
+        return Ok(());
+    }
+    let is_setup_flag = ALREADY_SETUP_FLAG
+        .compare_exchange_weak(
+            false,    // 当前期望值
+            true,     // 要设置的新值
+            Ordering::AcqRel, // 内存顺序
+            Ordering::Relaxed,
+        )
+        .unwrap_or_else(|_| true);
 
+    if !is_setup_flag {
+        run().unwrap_throw();
+    }
     Ok(())
 }
 
@@ -353,6 +443,35 @@ impl WasmApi {
         log::debug!("Received HighlightDefragEvent command from JS: {}", service_id);
         if self.proxy.send_event(command).is_err() {
             return Err(JsValue::from_str("Failed to send HighlightDefragEvent command to event loop."));
+        }
+        Ok(())
+    }
+
+    // ++ NEW: The function to attach to the DOM, returning a promise.
+    #[wasm_bindgen(js_name = attachCanvasToDom)]
+    pub fn attach_canvas_to_dom(&self, canvas_id: &str) -> Result<Promise, JsValue> {
+        self.proxy.send_event(UserCommand::AttachCanvas(canvas_id.to_string()))
+            .map_err(|e| JsValue::from_str(&format!("Failed to send AttachCanvas: {}", e)))?;
+        
+        let (_, receiver) = CANVAS_READY_FLUME_CHANNEL.get()
+        .ok_or_else(|| JsValue::from_str("CANVAS ready channel already taken or not initialized. Make sure getWasmApi() is called only once."))?;
+
+        // Convert the Rust Future obtained from the flume receiver into a js_sys::Promise
+        let ready_promise = future_to_promise(async move {
+            receiver.recv_async().await.unwrap_throw(); // Wait for the signal
+            Ok(JsValue::NULL) // Resolve with null
+        });
+
+        // 将 Rust Future 转换为 JS Promise
+        Ok(ready_promise)
+    }
+
+    // ++ RENAME and MODIFY
+    #[wasm_bindgen(js_name = destroyView)]
+    pub fn destroy_view(&self) -> Result<(), JsValue> {
+        log::info!("JS called destroy_view");
+        if self.proxy.send_event(UserCommand::DestroyView).is_err() {
+            return Err(JsValue::from_str("Failed to send DestroyView command."));
         }
         Ok(())
     }

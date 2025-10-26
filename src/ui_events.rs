@@ -17,6 +17,7 @@ use crate::models::{Vertex2D, CircleInstance, LineVertex};
 #[allow(unused)]
 #[derive(Debug)]
 pub enum UserCommand {
+    AttachCanvas(String),
     SetFullTopology {
         elements: Vec<ElementData>,
         connections: Vec<ConnectionData>,
@@ -25,6 +26,7 @@ pub enum UserCommand {
     StateInitialized, // Notifies App that State setup is complete
     SetTimeSelection(f32), // 新增：设置时间轴选中的时刻
     SetHighlightDefragService(i32),
+    DestroyView,
 }
 
 impl State {
@@ -67,6 +69,12 @@ impl State {
             UserCommand::StateInitialized => {
                 // ...
             }
+            UserCommand::AttachCanvas (_) => {
+                // ...
+            }
+            UserCommand::DestroyView => {
+                // ...
+            }
             UserCommand::SetTimeSelection(time) => {
                 if (self.current_time_selection - time).abs() > f32::EPSILON {
                     self.current_time_selection = time;
@@ -93,7 +101,7 @@ impl State {
                         AnyEvent::Reallocation { service_id, details, .. } => {
                             // 如果 re-allocation 的来源是 selected_service_id
                             if selected_service_id == details.defrag_service_id {
-                                highlight_service_id_vec.push(*service_id);
+                                // highlight_service_id_vec.push(*service_id);
                                 // 如果主要服务还没找到，则将此 reallocation 的 arrival_time 作为时间起点
                                 if !found_service {
                                     arrival_time_for_highlight = details.service.arrival_time;
