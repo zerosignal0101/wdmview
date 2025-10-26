@@ -307,7 +307,7 @@ impl ApplicationHandler<UserCommand> for App {
             } => {
                 if key_state.is_pressed() && !repeat {
                     let mut changed = false;
-                    let pan_speed = 10.0 / state.camera.zoom;
+                    let pan_speed = 1.0 / state.camera.zoom;
                     let zoom_factor = 1.1;
 
                     match code {

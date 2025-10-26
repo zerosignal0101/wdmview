@@ -60,6 +60,7 @@ impl State {
 
                 self.line_vertices.clear();
                 self.highlight_line_vertices.clear(); // 清空高亮线条
+                self.world_text_labels.clear();
 
                 self.topology_needs_update = true;
                 self.current_time_selection = 0.0; // Reset time to 0
@@ -79,6 +80,7 @@ impl State {
                 if (self.current_time_selection - time).abs() > f32::EPSILON {
                     self.current_time_selection = time;
                     self.highlight_service_id_list = None; // 清除高亮服务
+                    self.world_text_labels.clear();
                     self.topology_needs_update = true;
                     log::debug!("Time selection updated to: {}", time);
                 }
