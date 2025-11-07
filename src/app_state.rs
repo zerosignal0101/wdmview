@@ -684,7 +684,7 @@ impl State {
 
         let reconstructed_service_dict = reconstruct_state_at_time(&self.all_events, self.current_time_selection);
 
-        for service in reconstructed_service_dict.values() {
+        for (service_id, service) in reconstructed_service_dict.iter() {
             let departure_time = service.departure_time;
             // 检查服务是否在当前时间活跃
             if self.current_time_selection >= service.arrival_time && self.current_time_selection < departure_time {
@@ -694,7 +694,7 @@ impl State {
                 let hue_color = (effective_wavelength + 0.5) / (MAX_WAVELENGTHS as f32) * 180.0 + 30.0;
 
                 let is_highlighted = match &self.highlight_service_id_list {
-                    Some(highlight_service_id_list) => highlight_service_id_list.iter().any(|&srv_id| srv_id == service.service_id),
+                    Some(highlight_service_id_list) => highlight_service_id_list.iter().any(|&srv_id| srv_id == *service_id),
                     None => false,
                 };
 
@@ -754,7 +754,7 @@ impl State {
                     } else {
                         log::warn!(
                             "Service {} path references non-existent node ID. Segment: {} -> {}",
-                            service.service_id, source_node_id, target_node_id
+                            service_id, source_node_id, target_node_id
                         );
                     }
                 }
@@ -798,7 +798,7 @@ impl State {
                     } else {
                         log::warn!(
                             "Service {} path references non-existent node ID. Segment: {} -> {} -> {}",
-                            service.service_id, source_node_id, middle_node_id, target_node_id
+                            service_id, source_node_id, middle_node_id, target_node_id
                         );
                     }
                 }
