@@ -59,6 +59,7 @@ pub struct State {
     pub all_elements: Vec<ElementData>, // 存储所有节点数据
     pub all_connections: Vec<ConnectionData>,
     pub all_events: Vec<AnyEvent>, // 存储所有事件变化数据
+    pub num_channels: u32,
     // 用于快速查找节点 ID 对应的 circle_instances 索引
     pub node_id_to_idx: HashMap<String, usize>,
     pub current_time_selection: f32, // 当前时间轴选中的时刻
@@ -462,6 +463,7 @@ impl State {
             all_elements: Vec::new(),
             all_connections: Vec::new(),
             all_events: Vec::new(),
+            num_channels: 80,
             node_id_to_idx: HashMap::new(),
             current_time_selection: 0.0, // 默认初始时间为 0
             highlight_service_id_list: None,
@@ -679,7 +681,7 @@ impl State {
         }
 
         // --- 3. 渲染当前时间活跃的服务线条 ---
-        const MAX_WAVELENGTHS: u32 = 80;
+        let num_channels = self.num_channels;
         const SERVICE_MAX_SPREAD_ANGLE: f32 = LINK_BOUNDARY_ROTATE_ANGLE * 0.95;
 
         let reconstructed_service_dict = reconstruct_state_at_time(&self.all_events, self.current_time_selection);
@@ -689,9 +691,9 @@ impl State {
             // 检查服务是否在当前时间活跃
             if self.current_time_selection >= service.arrival_time && self.current_time_selection < departure_time {
                 let wavelength = service.wavelength;
-                let effective_wavelength = (wavelength as f32).min((MAX_WAVELENGTHS - 1) as f32);
+                let effective_wavelength = (wavelength as f32).min((num_channels - 1) as f32);
 
-                let hue_color = (effective_wavelength + 0.5) / (MAX_WAVELENGTHS as f32) * 180.0 + 30.0;
+                let hue_color = (effective_wavelength + 0.5) / (num_channels as f32) * 180.0 + 30.0;
 
                 let is_highlighted = match &self.highlight_service_id_list {
                     Some(highlight_service_id_list) => highlight_service_id_list.iter().any(|&srv_id| srv_id == service.service_id),
@@ -713,7 +715,7 @@ impl State {
                 // 如果不是高亮服务，亮度调整回默认的0.6。
                 // `service_color_f32` will be determined by `is_highlighted`.
 
-                let normalized_wavelength_factor = (effective_wavelength - ((MAX_WAVELENGTHS as f32 - 1.0) / 2.0)) / ((MAX_WAVELENGTHS as f32 - 1.0) / 2.0);
+                let normalized_wavelength_factor = (effective_wavelength - ((num_channels as f32 - 1.0) / 2.0)) / ((num_channels as f32 - 1.0) / 2.0);
                 let wavelength_rotate_angle = normalized_wavelength_factor * SERVICE_MAX_SPREAD_ANGLE;
 
                 for i in 0..(service.path.len() - 1) {

@@ -425,6 +425,18 @@ impl WasmApi {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = setNumChannels)]
+    pub fn set_num_channels(&self, num_channels: u32) -> Result<(), JsValue> {
+        let command = UserCommand::SetNumChannels { num_channels };
+
+        log::info!("Received SetNumChannels command from JS.");
+
+        if self.proxy.send_event(command).is_err() {
+            return Err(JsValue::from_str("Failed to send command to event loop."));
+        }
+        Ok(())
+    }
+
     /// 设置当前时间轴选中的时刻
     #[wasm_bindgen(js_name = setTimeSelection)]
     pub fn set_time_selection(&self, time: f32) -> Result<(), JsValue> {

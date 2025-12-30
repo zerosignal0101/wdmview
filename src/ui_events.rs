@@ -23,6 +23,9 @@ pub enum UserCommand {
         connections: Vec<ConnectionData>,
         defrag_timeline_events: Vec<AnyEvent>,
     },
+    SetNumChannels {
+        num_channels: u32
+    },
     StateInitialized, // Notifies App that State setup is complete
     SetTimeSelection(f32), // 新增：设置时间轴选中的时刻
     SetHighlightDefragService(i32),
@@ -66,6 +69,9 @@ impl State {
                 self.current_time_selection = 0.0; // Reset time to 0
                 self.highlight_service_id_list = None; // Clear highlight
                 self.fit_view_to_topology();
+            }
+            UserCommand::SetNumChannels { num_channels } => {
+                self.num_channels = num_channels;
             }
             UserCommand::StateInitialized => {
                 // ...
